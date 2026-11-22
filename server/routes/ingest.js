@@ -17,8 +17,10 @@ const limiter = rateLimit({
   standardHeaders: true, legacyHeaders: false, message: { error: 'Too many import requests, slow down' },
 });
 
+const logger = require('../utils/logger');
 const fail = (res, e) => {
   if (!e.status) console.error('[ingest]', e);
+  else logger.warn('Ingest', `${res.req.method} ${res.req.originalUrl.split('?')[0]} -> ${e.status}${e.code ? ` ${e.code}` : ''}: ${e.message}`); // the access log only has the status
   res.status(e.status || 500).json({ error: e.status ? e.message : 'Import failed', ...(e.code && e.status ? { code: e.code } : {}) });
 };
 

@@ -192,7 +192,7 @@ const waitJob = async (getJob, id) => { for (let i = 0; i < 100; i++) { const j 
 
   // ── optional FlareSolverr (Cloudflare challenge solving) ──
   const fsMod = require('../server/services/ingest/flaresolverr');
-  const fsReset = () => { fsMod._cache.clear(); state.fsCalls = []; state.protectedSeen = []; state.fsMode = 'ok'; state.fsExpires = 3600; delete process.env.FLARESOLVERR_URL; delete process.env.FLARESOLVERR_HOSTS; };
+  const fsReset = () => { fsMod._cache.clear(); state.fsCalls = []; state.protectedSeen = []; state.fsMode = 'ok'; state.fsExpires = 3600; state.cfNeedsCookie = true; state.tvNeedsFs = false; delete process.env.FLARESOLVERR_URL; delete process.env.FLARESOLVERR_HOSTS; };
   const dl = async u => { const f = path.join(tmp, `dl-${Date.now()}-${Math.random()}.bin`); try { return { size: await guard.downloadToFile(u, f, 1 << 20), file: f }; } finally { /* keep for size check */ } };
 
   await check('FlareSolverr off by default: a challenged CDN download fails as bot protection and FlareSolverr is never called', async () => {
@@ -231,13 +231,41 @@ const waitJob = async (getJob, id) => { for (let i = 0; i < 100; i++) { const j 
     fsReset();
   });
 
-  await check('FlareSolverr failures are explained and never loop: unreachable, cannot solve, no clearance cookie', async () => {
-    for (const [mode, re] of [['down', /FlareSolverr is not reachable/], ['error', /could not solve/], ['no-clearance', /did not obtain a Cloudflare clearance/]]) {
+  await check('FlareSolverr failures are explained and never loop: unreachable, cannot solve, its own browser refused, clearance not accepted', async () => {
+    for (const [mode, re] of [['down', /FlareSolverr is not reachable/], ['error', /could not solve/], ['refused', /own browser was refused too \(HTTP 403\)/], ['no-clearance', /clearance FlareSolverr obtained was not accepted/]]) {
       fsReset(); process.env.FLARESOLVERR_URL = 'http://flaresolverr.test:8191'; state.fsMode = mode;
-      await dl('https://cdn.thingiverse.com/img.jpg').then(() => assert.fail('expected rejection'), e => { assert.strictEqual(e.code, 'blocked'); assert.match(e.message, re); });
+      await dl('https://cdn.thingiverse.com/img.jpg').then(() => assert.fail('expected rejection'), e => { assert.strictEqual(e.code, 'blocked'); assert.match(e.message, re, mode); });
       assert.strictEqual(state.fsCalls.length, 1, `${mode}: exactly one attempt`);
+      assert.strictEqual(fsMod.clearanceFor('cdn.thingiverse.com'), null, `${mode}: nothing cached after a failure`);
     }
     fsReset();
+  });
+
+  await check('FlareSolverr whose browser is never challenged (no cf_clearance cookie, as on the real instance): its User-Agent alone is enough, no cookie header is sent', async () => {
+    fsReset(); process.env.FLARESOLVERR_URL = 'http://flaresolverr.test:8191'; state.fsMode = 'no-clearance'; state.cfNeedsCookie = false;
+    const r = await dl('https://cdn.thingiverse.com/img.jpg');
+    assert.strictEqual(r.size, 8); assert.strictEqual(state.fsCalls.length, 1);
+    const last = state.protectedSeen[state.protectedSeen.length - 1];
+    assert.strictEqual(last.ua, 'Solved-UA/1'); assert.strictEqual(last.cookie, undefined);
+    await dl('https://cdn.thingiverse.com/again.jpg');
+    assert.strictEqual(state.fsCalls.length, 1, 'the User-Agent clearance is cached too');
+    fsReset();
+  });
+
+  await check('Parallel challenged requests to one host share a single FlareSolverr solve', async () => {
+    fsReset(); process.env.FLARESOLVERR_URL = 'http://flaresolverr.test:8191';
+    const rs = await Promise.all([dl('https://cdn.thingiverse.com/a.jpg'), dl('https://cdn.thingiverse.com/b.jpg'), dl('https://cdn.thingiverse.com/c.jpg')]);
+    assert.ok(rs.every(r => r.size === 8)); assert.strictEqual(state.fsCalls.length, 1);
+    fsReset();
+  });
+
+  await check('Thingiverse API behind a challenge with FlareSolverr (browser not challenged): the two parallel API calls cost one solve and the preview works', async () => {
+    fsReset(); process.env.FLARESOLVERR_URL = 'http://flaresolverr.test:8191'; process.env.THINGIVERSE_TOKEN = 'tok';
+    state.fsMode = 'no-clearance'; state.cfNeedsCookie = false; state.tvNeedsFs = true;
+    const p = await preview('https://www.thingiverse.com/thing:5');
+    assert.strictEqual(p.title, 'TV thing'); assert.strictEqual(state.fsCalls.length, 1);
+    assert.ok(state.fsCalls[0].url.startsWith('https://api.thingiverse.com/'));
+    delete process.env.THINGIVERSE_TOKEN; fsReset();
   });
 
   await check('A short-lived clearance is not cached (expiry margin), so the next request solves again', async () => {

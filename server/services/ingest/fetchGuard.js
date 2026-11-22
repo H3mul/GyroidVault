@@ -72,7 +72,7 @@ async function guardedFetch(url, opts = {}) {
       // A FlareSolverr clearance is bound to the browser's User-Agent, so that one is sent with its cookie.
       headers: {
         'user-agent': (clearance && clearance.ua) || process.env.INGEST_USER_AGENT || UA, accept: '*/*',
-        ...(clearance ? { cookie: clearance.cookie } : {}), ...(opts.headers || {}),
+        ...(clearance && clearance.cookie ? { cookie: clearance.cookie } : {}), ...(opts.headers || {}),
       },
     });
     let res = await send(useFs ? flare.clearanceFor(host) : null);
@@ -81,6 +81,10 @@ async function guardedFetch(url, opts = {}) {
       let clearance;
       try { clearance = await flare.solve(current, host); } catch (e) { throw new IngestError(`Blocked by the site's bot protection and ${e.message}`, 422, 'blocked'); }
       res = await send(clearance);
+      if (res.headers.get('cf-mitigated') === 'challenge') { // the clearance did not help: do not cache it, do not loop
+        await res.body?.cancel(); flare.forget(host);
+        throw new IngestError("Blocked by the site's bot protection; the clearance FlareSolverr obtained was not accepted", 422, 'blocked');
+      }
     }
     if ([301, 302, 303, 307, 308].includes(res.status) && res.headers.get('location')) {
       await res.body?.cancel();
