@@ -76,6 +76,12 @@ function ownedJob(req, res) {
   return job;
 }
 
+// Latest import job for a model (null when the model was not imported from a URL)
+router.get('/models/:modelId/job', authenticate, (req, res) => {
+  const row = get('SELECT id FROM ingest_jobs WHERE model_id=? ORDER BY id DESC LIMIT 1', [Number(req.params.modelId)]);
+  res.json(row ? getJob(row.id) : null);
+});
+
 router.get('/jobs/:id', authenticate, (req, res) => {
   const job = ownedJob(req, res);
   if (job) res.json(job);

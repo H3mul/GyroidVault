@@ -972,6 +972,19 @@ const UI = {
 
     return `
       <form id="model-form" onsubmit="App.handleModelSubmit(event,${model?.id || 'null'})">
+        ${!isEdit ? `
+        <div class="form-group" id="import-url-group">
+          <label class="form-label">Import from URL (Printables, Thingiverse)</label>
+          <div class="add-inline">
+            <input type="url" id="import-url-input" class="form-input" placeholder="https://www.printables.com/model/..." onkeydown="if(event.key==='Enter'){event.preventDefault();App.importFromUrl();}">
+            <button type="button" class="btn btn-secondary btn-sm" id="import-url-btn" onclick="App.importFromUrl()">Import</button>
+          </div>
+          <div id="import-url-status" style="font-size:.8rem;margin-top:6px;color:var(--text-muted)"></div>
+          <div id="import-files-list" style="margin-top:6px"></div>
+          <div style="font-size:.7rem;color:var(--text-muted);margin-top:6px">One click from a model page: drag
+            <a href="javascript:(function(){window.open('${UI.esc(location.origin)}/#/import?url='+encodeURIComponent(location.href))})()" onclick="event.preventDefault();App.toast('Drag this link to your bookmarks bar instead of clicking it')">Send to GyroidVault</a>
+            to your bookmarks bar.</div>
+        </div>` : ''}
         <div class="form-group">
           <label class="form-label">Name *</label>
           <input class="form-input" name="name" required value="${model?.name || ''}" placeholder="e.g. Phone Stand v2" id="model-name-input">
@@ -1031,6 +1044,22 @@ const UI = {
           <button type="submit" class="btn btn-primary" id="model-submit-btn">${isEdit ? 'Save Changes' : 'Create Model'}</button>
         </div>
       </form>`;
+  },
+
+  // ── URL import status banner (model detail) ──
+  ingestBanner(job) {
+    if (!job || job.status === 'completed') return '';
+    const active = job.status === 'pending' || job.status === 'running';
+    const failed = (job.detail || []).filter(d => d.status === 'failed' || d.status === 'skipped');
+    const title = active ? `Importing files from the source site… ${job.done}/${job.total || '?'}`
+      : job.status === 'partial' ? 'Some files could not be imported' : 'Files could not be imported';
+    return `<div class="glass-panel" style="padding:12px 16px;margin-bottom:16px;border-left:3px solid var(--accent-${active ? 'cyan' : 'yellow'})">
+      <strong>${title}</strong>
+      ${job.error && !active ? `<div style="font-size:.85rem;margin-top:4px">${UI.esc(job.error)}</div>` : ''}
+      ${failed.map(d => `<div style="font-size:.8rem;color:var(--text-muted)">${UI.esc(d.name)}: ${UI.esc(d.reason || d.status)}</div>`).join('')}
+      ${active ? '' : `<div style="margin-top:8px;font-size:.8rem">Download the files manually from the source page, or
+        <button class="btn btn-secondary btn-xs" onclick="App.retryIngest(${Number(job.id)},${Number(job.model_id)})">Retry import</button></div>`}
+    </div>`;
   },
 
   // ── Upload Files Form ──

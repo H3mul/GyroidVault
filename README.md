@@ -154,6 +154,17 @@ npm start
 
 ---
 
+## Import from a URL (Printables, Thingiverse)
+
+In **New Model**, paste a model page URL and click **Import**. The title, description, source link and tags are filled in (including an origin tag such as `source:printables`) and any downloadable files are listed. Edit anything, then **Create Model**; the files and cover image are downloaded in the background and show up on the model page.
+
+- **Printables:** full import (metadata, tags, cover, files). No account needed.
+- **Thingiverse:** title, description and cover only, unless you set `THINGIVERSE_TOKEN` (a Thingiverse app token) to also import tags and files.
+- **Other sites:** pages that expose OpenGraph/JSON-LD metadata give title and description; sites that block automated access (e.g. Thangs, MakerWorld) cannot be imported and you fill the form in by hand.
+- **One click from the model page:** drag the *Send to GyroidVault* link from the New Model dialog to your bookmarks bar. It opens `#/import?url=<page>` on your instance.
+- **API:** `POST /api/ingest/preview {url}`, `POST /api/ingest {url, auto_rename?, allow_duplicate?, download_files?, file_ids?}` (creates the model and starts a download job), `GET /api/ingest/jobs/:id`, `POST /api/ingest/jobs/:id/retry`. Requires an uploader or admin account.
+- **Limits:** `INGEST_MAX_FILE_MB` (default 200) and `INGEST_MAX_TOTAL_MB` (default 500). Only normal model/slicer/archive/image file types are downloaded, executables are rejected, and private or local network addresses are refused.
+
 ## Security & Privacy
  
 - **100% Local & Self-Hosted:** Everything lives on your own storage in a lightweight SQLite database. No mandatory cloud accounts, no third-party trackers, no telemetry.

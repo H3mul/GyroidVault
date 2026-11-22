@@ -113,9 +113,10 @@ const API = {
   createModel(data) {
     return this.request('/api/models', { method: 'POST', body: JSON.stringify(data) });
   },
-  importModelUrl(url) {
-    return this.request('/api/models/import', { method: 'POST', body: JSON.stringify({ url }) });
-  },
+  ingestPreview(url) { return this.request('/api/ingest/preview', { method: 'POST', body: JSON.stringify({ url }) }); },
+  ingestDownload(model_id, url, file_ids) { return this.request('/api/ingest/download', { method: 'POST', body: JSON.stringify({ model_id, url, file_ids }) }); },
+  ingestJobForModel(modelId) { return this.request(`/api/ingest/models/${modelId}/job`); },
+  ingestRetry(jobId) { return this.request(`/api/ingest/jobs/${jobId}/retry`, { method: 'POST' }); },
   updateModel(id, data) {
     return this.request(`/api/models/${id}`, { method: 'PUT', body: JSON.stringify(data) });
   },
