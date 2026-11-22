@@ -29,6 +29,7 @@ const API = {
       const err = await res.json().catch(() => ({ error: 'Request failed' }));
       const error = new Error(err.error || 'Request failed');
       error.status = res.status;
+      error.code = err.code;
       error.suggested_name = err.suggested_name;
       error.suggested_names = err.suggested_names || (err.suggested_name ? [err.suggested_name] : []);
       throw error;

@@ -11,9 +11,14 @@ class IngestError extends Error {
 const MAX_REDIRECTS = 3;
 const codeForHttp = st => (st === 404 || st === 410 ? 'not_found' : st === 429 ? 'rate_limited' : st === 403 || st === 503 ? 'blocked' : 'http');
 /** A failed response as an IngestError; a Cloudflare challenge is named as bot protection, not a bare 403. */
-const httpError = (res, prefix) => (res.headers.get('cf-mitigated') === 'challenge'
-  ? new IngestError("Blocked by the site's bot protection (Cloudflare challenge); automated access is not allowed from this network", 422, 'blocked')
-  : new IngestError(`${prefix} HTTP ${res.status}`, 422, codeForHttp(res.status)));
+const httpError = (res, prefix) => {
+  const challenge = res.headers.get('cf-mitigated') === 'challenge';
+  const e = challenge
+    ? new IngestError("Blocked by the site's bot protection (Cloudflare challenge); automated access is not allowed from this network", 422, 'blocked')
+    : new IngestError(`${prefix} HTTP ${res.status}`, 422, codeForHttp(res.status));
+  e.httpStatus = res.status; e.challenge = challenge;
+  return e;
+};
 const TIMEOUT_MS = 15000;
 
 /** True only for globally routable unicast addresses. */

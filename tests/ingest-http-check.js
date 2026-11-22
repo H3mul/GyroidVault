@@ -102,6 +102,18 @@ async function waitJob(session, id) {
     assert.strictEqual((await req('/api/models', { session: owner })).data.models?.length ?? (await req('/api/models', { session: owner })).data.length ?? 0, 0);
   });
 
+  await check('Thingiverse URLs without a configured token: 422 with code token_required on preview, import and download; nothing created', async () => {
+    const tv = 'https://www.thingiverse.com/thing:5';
+    for (const [p, body] of [['/api/ingest/preview', { url: tv }], ['/api/ingest', { url: tv }]]) {
+      const r = await post(p, body);
+      assert.strictEqual(r.status, 422, `${p} -> ${r.status}`); assert.strictEqual(r.data.code, 'token_required');
+      assert.ok(r.data.error.includes('THINGIVERSE_TOKEN') && r.data.error.includes('thingiverse.com/apps/create'));
+    }
+    const manual = await post('/api/models', { name: 'Needs thing download' });
+    const dl = await post('/api/ingest/download', { model_id: manual.data.id, url: tv });
+    assert.strictEqual(dl.status, 422); assert.strictEqual(dl.data.code, 'token_required');
+  });
+
   let modelId, jobId;
   await check('One-shot import creates model, owner is the importer, job runs and reports per-file results', async () => {
     const r = await post('/api/ingest', { url, file_ids: ['stl:1', 'stl:2'] });

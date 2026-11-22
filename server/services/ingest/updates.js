@@ -24,7 +24,7 @@ const nextCheckSql = h => `datetime('now','+${Math.max(1, Math.floor(h * 60))} m
 /** Pure: compare a stored snapshot with a fresh preview. snap = {remote_modified, files|null, meta|null}. */
 function classify(snap, remote) {
   const rFiles = toFiles(remote.files);
-  const filesKnown = Array.isArray(snap.files) && !remote.filesNeedToken;
+  const filesKnown = Array.isArray(snap.files);
   const sMap = new Map((snap.files || []).map(f => [f.name, f]));
   const added = [], changed = [], unchanged = [];
   if (filesKnown) {
@@ -61,7 +61,7 @@ function snapshotFrom(p, modelName) {
   return {
     site: p.site, source_url: p.url, remote_id: p._raw?._printId || p._raw?._thingId || null,
     remote_modified: p.remoteModified || null,
-    files: p.filesNeedToken ? null : toFiles(p.files),
+    files: toFiles(p.files),
     meta: { name: modelName, title: p.title, description: p.description, tags: upstreamTags(p.tags) },
   };
 }
@@ -115,7 +115,7 @@ async function checkModel(modelId) {
   try { p = await preview(row.source_url); } catch (e) { return recordFailure(modelId, row, e); }
 
   const c = classify(row, p);
-  const upgrade = c.state === 'current' && row.files === null && !p.filesNeedToken; // legacy baseline becomes a real snapshot
+  const upgrade = c.state === 'current' && row.files === null; // legacy baseline becomes a real snapshot
   if (upgrade) saveSnapshot(modelId, p, model.name);
   else if (c.state === 'current' && p.remoteModified) run('UPDATE model_sources SET remote_modified=? WHERE model_id=?', [p.remoteModified, modelId]);
   const summary = { added: c.added, changed: c.changed, removed: c.removed, metaDiff: c.metaDiff, remoteModified: c.remoteModified, estimate: row.files === null };

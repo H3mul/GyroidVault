@@ -70,12 +70,28 @@ const waitJob = async (getJob, id) => { for (let i = 0; i < 100; i++) { const j 
     await rejects(preview('https://www.printables.com/'), 400, /expected \/model/);
   });
 
-  await check('Thingiverse without token: OpenGraph/JSON-LD metadata, origin tag, no files, filesNeedToken', async () => {
-    const p = await preview('https://www.thingiverse.com/thing:5');
-    assert.strictEqual(p.title, 'Benchy & friends');
-    assert.deepStrictEqual(p.tags, ['source:thingiverse']);
-    assert.strictEqual(p.files.length, 0);
-    assert.strictEqual(p.filesNeedToken, true);
+  await check('Thingiverse without a token fails immediately (code token_required) with instructions and makes no network request', async () => {
+    state.calls = []; const dns0 = state.dnsLookups;
+    for (const url of ['https://www.thingiverse.com/thing:5', 'https://thingiverse.com/thing:5/files', 'https://www.thingiverse.com/thing:5-some-slug']) {
+      await preview(url).then(() => assert.fail('expected rejection'), e => {
+        assert.strictEqual(e.status, 422); assert.strictEqual(e.code, 'token_required');
+        assert.ok(e.message.includes('THINGIVERSE_TOKEN') && e.message.includes('https://www.thingiverse.com/apps/create'), e.message);
+      });
+    }
+    assert.deepStrictEqual(state.calls, [], 'no fetch of any kind');
+    assert.strictEqual(state.dnsLookups, dns0, 'not even a DNS lookup: the token check comes first');
+    await importFromUrl(null, { url: 'https://www.thingiverse.com/thing:5' }).then(() => assert.fail('expected rejection'), e => assert.strictEqual(e.code, 'token_required'));
+    assert.strictEqual(get("SELECT COUNT(*) c FROM models WHERE source_url LIKE '%thingiverse%'").c, 0, 'nothing is created');
+  });
+
+  await check('Thingiverse: a rejected token is bad_token (no page-scraping fallback); a bot challenge on the API is not mistaken for a bad token', async () => {
+    process.env.THINGIVERSE_TOKEN = 'wrong';
+    state.calls = [];
+    await preview('https://www.thingiverse.com/thing:5').then(() => assert.fail('expected rejection'), e => { assert.strictEqual(e.code, 'bad_token'); assert.match(e.message, /rejected the API token/); });
+    assert.ok(!state.calls.includes('https://www.thingiverse.com/thing:5'), 'the thing page was never fetched');
+    state.tvChallenge = true;
+    await preview('https://www.thingiverse.com/thing:5').then(() => assert.fail('expected rejection'), e => { assert.strictEqual(e.code, 'blocked'); assert.match(e.message, /bot protection/i); });
+    state.tvChallenge = false; delete process.env.THINGIVERSE_TOKEN;
   });
 
   await check('Thingiverse with token: API metadata, tags and files; token sent only to the API', async () => {
@@ -84,7 +100,6 @@ const waitJob = async (getJob, id) => { for (let i = 0; i < 100; i++) { const j 
     delete process.env.THINGIVERSE_TOKEN;
     assert.deepStrictEqual(p.tags, ['source:thingiverse', 'boat']);
     assert.strictEqual(p.files[0].name, 'boat.stl');
-    assert.strictEqual(p.filesNeedToken, false);
   });
 
   await check('Generic fallback for unknown hosts tags with the hostname', async () => {
@@ -176,7 +191,7 @@ const waitJob = async (getJob, id) => { for (let i = 0; i < 100; i++) { const j 
   });
 
   await check('Library sync keeps URL-imported models that have no files; stale jobs recover as failed', async () => {
-    const metaOnly = (await importFromUrl(null, { url: 'https://www.thingiverse.com/thing:5', download_files: false })).body.model;
+    const metaOnly = (await importFromUrl(null, { url: 'https://www.printables.com/model/99-test', allow_duplicate: true, auto_rename: true, download_files: false })).body.model;
     run("INSERT INTO ingest_jobs (model_id, source_url, status) VALUES (?, 'https://x', 'running')", [metaOnly.id]);
     jobs.recoverStaleJobs();
     assert.strictEqual(get("SELECT status FROM ingest_jobs WHERE source_url='https://x'").status, 'failed');

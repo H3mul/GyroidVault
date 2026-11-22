@@ -46,7 +46,7 @@ async function updatePreview(modelId) {
   const c = U.classify(row, p);
   const status = new Map([...c.added.map(f => [f.name, 'new']), ...c.changed.map(f => [f.name, 'changed']), ...c.unchanged.map(f => [f.name, 'unchanged'])]);
   return {
-    state: c.state, filesKnown: c.filesKnown, filesNeedToken: !!p.filesNeedToken, source_url: p.url, remoteModified: c.remoteModified,
+    state: c.state, filesKnown: c.filesKnown, source_url: p.url, remoteModified: c.remoteModified,
     files: p.files.map(f => ({ ...f, status: status.get(f.name) || 'unknown' })),
     removed: c.removed, metaDiff: c.metaDiff, remote: { title: p.title, description: p.description, tags: U.upstreamTags(p.tags) },
     estimate: row.files === null,
@@ -87,11 +87,7 @@ async function runUpdateJob(jobId, userId) {
     const row = U.ensureRow(old);
     const p = await preview(row.source_url); // fresh: signed links expire, and the snapshot must reflect what we fetch
     const provider = p._provider, raw = p._raw;
-    if (p.filesNeedToken || !p.files.length) {
-      return fail(p.filesNeedToken
-        ? 'This site needs an API token (THINGIVERSE_TOKEN) to download files. Open the source page to get the new files, or refresh metadata only.'
-        : 'The source lists no downloadable files.');
-    }
+    if (!p.files.length) return fail('The source lists no downloadable files.');
     const c = U.classify(row, p);
     const unchanged = new Set(c.unchanged.map(f => f.name));
     const sel = job.selected ? new Set(JSON.parse(job.selected)) : null;

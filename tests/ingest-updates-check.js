@@ -74,7 +74,6 @@ const rejects = (p, status) => p.then(() => assert.fail('expected rejection'), e
     const noFiles = { ...base, files: null };
     assert.strictEqual(U.classify(noFiles, rem({ remoteModified: '2027-01-01T00:00:00.000Z' })).state, 'unknown_changed');
     assert.strictEqual(U.classify(noFiles, rem()).state, 'current');
-    assert.strictEqual(U.classify(base, rem({ filesNeedToken: true, files: [], remoteModified: '2027-01-01T00:00:00.000Z' })).state, 'unknown_changed');
     assert.strictEqual(U.classify({ ...base, files: null, meta: null }, rem({ title: 'whatever' })).state, 'current');
     assert.strictEqual(U.classify({ remote_modified: null, files: null, meta: null }, rem()).state, 'unknown_changed', 'no baseline time: any remote time is newer');
   });
@@ -268,12 +267,23 @@ const rejects = (p, status) => p.then(() => assert.fail('expected rejection'), e
     const j = await waitJob(S.startUpdateJob(id83, ['stl:51', 'stl:53'], null));
     assert.deepStrictEqual(names(j.result_model_id).filter(n => n.endsWith('.stl')), ['p.stl', 'r.stl']);
   });
-  await check('Token-less Thingiverse cannot update files: job fails cleanly with guidance and no version', async () => {
-    const id = (await importFromUrl(null, { url: 'https://www.thingiverse.com/thing:5', download_files: false })).body.model.id;
+  await check('Legacy token-less Thingiverse model: without a token checks/updates fail with token_required (state kept, nothing created); with a token it is baselined', async () => {
+    const id = run("INSERT INTO models (name, source_url, created_at, description) VALUES ('Old TV thing','https://www.thingiverse.com/thing:5','2020-01-01 00:00:00','d')").lastId;
+    run("INSERT INTO model_sources (model_id, site, source_url, remote_modified, files_fingerprint, meta_snapshot, state) VALUES (?, 'thingiverse', 'https://www.thingiverse.com/thing:5', '2020-01-01T00:00:00.000Z', NULL, NULL, 'current')", [id]);
     const before = newModelsCount();
+    const r = await U.checkModel(id);
+    assert.deepStrictEqual([r.ok, r.code, srcState(id).state], [false, 'token_required', 'current']);
+    assert.match(srcState(id).last_error, /THINGIVERSE_TOKEN/);
     const j = await waitJob(S.startUpdateJob(id, null, null));
     assert.strictEqual(j.status, 'failed'); assert.match(j.error, /THINGIVERSE_TOKEN/);
-    assert.strictEqual(newModelsCount(), before);
+    assert.strictEqual(newModelsCount(), before, 'no version created');
+    await rejects(S.updatePreview(id), 422);
+    process.env.THINGIVERSE_TOKEN = 'tok';
+    const ok = await U.checkModel(id);
+    delete process.env.THINGIVERSE_TOKEN;
+    assert.strictEqual(ok.ok, true); assert.strictEqual(ok.state, 'current');
+    assert.deepStrictEqual(U.parseRow(srcState(id)).files.map(f => f.name), ['boat.stl'], 'baselined into a real snapshot with the file list');
+    assert.strictEqual(srcState(id).last_error, null);
   });
 
   // ── metadata refresh ──

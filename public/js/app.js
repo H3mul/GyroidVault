@@ -3108,7 +3108,8 @@ const App = {
     } catch (e) {
       this.pendingImport = null;
       document.getElementById('import-files-list').innerHTML = '';
-      status.textContent = `Could not import: ${e.message}. You can still fill the form in by hand.`;
+      if (e.code === 'token_required' || e.code === 'bad_token') status.innerHTML = UI.tokenPrompt(e.message, e.code);
+      else status.textContent = `Could not import: ${e.message}. You can still fill the form in by hand.`;
       document.querySelector('input[name="source_url"]').value = url;
     } finally { btn.disabled = false; }
   },
@@ -3119,7 +3120,7 @@ const App = {
     el.innerHTML = p.files.length
       ? `<div class="form-label">Files to import</div>` + p.files.map(f =>
           `<label class="form-checkbox" style="display:block"><input type="checkbox" name="import_files" value="${UI.esc(f.id)}" checked> ${UI.esc(f.name)}${kb(f.size)}</label>`).join('')
-      : `<div style="font-size:.8rem;color:var(--text-muted)">${p.filesNeedToken ? 'This site needs an API token (THINGIVERSE_TOKEN) for file downloads. Metadata only; upload the files yourself.' : 'No downloadable files found.'}</div>`;
+      : `<div style="font-size:.8rem;color:var(--text-muted)">No downloadable files found.</div>`;
   },
 
   async refreshIngestBanner(modelId, wasActive = false) {

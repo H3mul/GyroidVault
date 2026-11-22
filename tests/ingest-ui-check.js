@@ -41,6 +41,7 @@ vm.createContext(sandbox);
 vm.runInContext(`${code}\nthis.__API = API; this.__UI = UI; this.__App = App;`, sandbox);
 const { __API: API, __UI: UI, __App: App } = sandbox;
 const realRefreshIngest = App.refreshIngestBanner;
+const realRequest = API.request; // earlier tests stub API.request
 App.currentUser = { id: 1, username: 'u', role: 'admin' };
 App.toast = (m, t) => App.__toasts.push([m, t]); App.__toasts = [];
 
@@ -56,7 +57,7 @@ function buildForm(tagBoxes = {}) {
   return form;
 }
 const PREVIEW = { title: 'Bracket', description: 'Desc', url: 'https://www.printables.com/model/1', tags: ['source:printables', 'bracket', 'wall mount'], coverUrl: 'https://media.printables.com/c.jpg',
-  files: [{ id: 'stl:1', name: 'a<b>.stl', size: 2048 }, { id: 'stl:2', name: 'big.3mf', size: 5 * 1048576 }], filesNeedToken: false, existing_model: null };
+  files: [{ id: 'stl:1', name: 'a<b>.stl', size: 2048 }, { id: 'stl:2', name: 'big.3mf', size: 5 * 1048576 }], existing_model: null };
 
 (async () => {
   console.log('\nURL import UI');
@@ -114,12 +115,37 @@ const PREVIEW = { title: 'Bracket', description: 'Desc', url: 'https://www.print
     assert.strictEqual(els['import-url-btn'].disabled, false);
   });
 
-  await check('Files-need-token and no-files hints render instead of a checklist', () => {
+  await check('No-files hint renders instead of a checklist', () => {
     mk('import-files-list');
-    App.renderImportFiles({ files: [], filesNeedToken: true });
-    assert.ok(els['import-files-list'].innerHTML.includes('THINGIVERSE_TOKEN'));
-    App.renderImportFiles({ files: [], filesNeedToken: false });
+    App.renderImportFiles({ files: [] });
     assert.ok(els['import-files-list'].innerHTML.includes('No downloadable files'));
+  });
+
+  await check('Thingiverse token errors show a purposeful prompt (link + setting, escaped) and keep the form usable; other errors stay a plain message', async () => {
+    const form = buildForm(); els['import-url-input'].value = 'https://www.thingiverse.com/thing:5';
+    const err = (code, msg) => Object.assign(new Error(msg), { code });
+    API.ingestPreview = async () => { throw err('token_required', 'Thingiverse imports need an API token <b>x</b>'); };
+    await App.importFromUrl();
+    const html = els['import-url-status'].innerHTML;
+    assert.ok(html.includes('Thingiverse imports need an API token') && html.includes('https://www.thingiverse.com/apps/create') && html.includes('THINGIVERSE_TOKEN'));
+    assert.ok(!html.includes('<b>x</b>'), 'server message escaped');
+    assert.strictEqual(App.pendingImport, null); assert.strictEqual(form.elements.source_url.value, 'https://www.thingiverse.com/thing:5');
+    assert.strictEqual(els['import-url-btn'].disabled, false);
+    API.ingestPreview = async () => { throw err('bad_token', 'Thingiverse rejected the API token.'); };
+    await App.importFromUrl();
+    assert.ok(els['import-url-status'].innerHTML.includes('Thingiverse rejected the API token'));
+    API.ingestPreview = async () => { throw err('blocked', 'Blocked by the site\'s bot protection'); };
+    els['import-url-status'].innerHTML = ''; await App.importFromUrl();
+    assert.ok(els['import-url-status'].textContent.startsWith('Could not import: Blocked by the site'));
+    assert.ok(!els['import-url-status'].innerHTML.includes('apps/create'));
+  });
+
+  await check('API client exposes the server error code on thrown errors', async () => {
+    const stubbed = API.request; API.request = realRequest;
+    sandbox.fetch = async () => ({ ok: false, status: 422, json: async () => ({ error: 'needs token', code: 'token_required' }) });
+    const e = await API.request('/api/ingest/preview', { method: 'POST', body: '{}' }).catch(x => x);
+    API.request = stubbed;
+    assert.strictEqual(e.code, 'token_required'); assert.strictEqual(e.message, 'needs token'); assert.strictEqual(e.status, 422);
   });
 
   const submit = (chosen, extra = {}) => {
@@ -227,8 +253,8 @@ const PREVIEW = { title: 'Bracket', description: 'Desc', url: 'https://www.print
     assert.ok(html.includes('value="stl:1" checked') && html.includes('value="stl:2" checked') && html.includes('>new<') && html.includes('>unchanged<'));
     assert.ok(html.includes('3.0 MB') && html.includes('title, tags') && html.includes('estimate') && html.includes('App.runSourceUpdate(9)'));
     assert.ok(!html.includes('<i>') && !html.includes('old<b>'), 'names escaped');
-    const tok = UI.sourceUpdateDialog({ files: [], filesNeedToken: true, removed: [], metaDiff: {} }, 9);
-    assert.ok(tok.includes('THINGIVERSE_TOKEN') && !tok.includes('runSourceUpdate'));
+    const none = UI.sourceUpdateDialog({ files: [], removed: [], metaDiff: {} }, 9);
+    assert.ok(none.includes('no downloadable files') && !none.includes('runSourceUpdate'));
   });
   await check('Library: card shows an Update badge only when update_state is set; toolbar has the Updates filter', () => {
     assert.ok(UI.modelCard({ id: 1, name: 'x', update_state: 'outdated' }).includes('>Update<'));

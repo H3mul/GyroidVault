@@ -1047,6 +1047,16 @@ const UI = {
       </form>`;
   },
 
+  // ── Prompt shown when a Thingiverse import needs (or was refused for) its API token ──
+  tokenPrompt(message, code) {
+    const title = code === 'bad_token' ? 'Thingiverse rejected the API token' : 'Thingiverse imports need an API token';
+    return `<div class="glass-panel" style="padding:10px 14px;border-left:3px solid var(--accent-yellow);color:var(--text-primary)">
+      <strong>${UI.esc(title)}</strong>
+      <div style="font-size:.8rem;margin-top:4px">${UI.esc(message)}</div>
+      <div style="font-size:.8rem;margin-top:6px"><a href="https://www.thingiverse.com/apps/create" target="_blank" rel="noopener">Create a Thingiverse app token</a>, then set it on the server as <code>THINGIVERSE_TOKEN</code> (an administrator can do this in the deployment settings). You can still fill the form in by hand.</div>
+    </div>`;
+  },
+
   // ── Source update banner (model detail) ──
   sourceBanner(info, modelId) {
     if (!info || !info.supported) return '';
@@ -1084,8 +1094,8 @@ const UI = {
     const note = t => `<p style="font-size:.85rem;color:var(--text-muted)">${t}</p>`;
     const d = pv.metaDiff || {};
     const meta = [d.title && 'title', d.description && 'description', d.tags && 'tags'].filter(Boolean);
-    const body = pv.filesNeedToken || !pv.files.length
-      ? note(pv.filesNeedToken ? 'This site needs an API token (THINGIVERSE_TOKEN) for file downloads, so a new version cannot be created. Open the source page to get the files, or refresh metadata only.' : 'The source lists no downloadable files.')
+    const body = !pv.files.length
+      ? note('The source lists no downloadable files.')
       : `${note('A new version keeps your current version untouched. Unchanged files are copied from it; only new or changed files are downloaded.')}
         ${pv.estimate ? note('This model was added before update tracking, so what changed is an estimate.') : ''}
         <div class="form-label">Files in the new version</div>
@@ -1095,7 +1105,7 @@ const UI = {
       ${meta.length ? note(`Also changed on the source: ${meta.join(', ')}. Anything you edited yourself is kept.`) : ''}
       <div class="form-actions">
         <button type="button" class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-        ${pv.filesNeedToken || !pv.files.length ? '' : `<button type="button" class="btn btn-primary" onclick="App.runSourceUpdate(${Number(modelId)})">Create new version</button>`}
+        ${!pv.files.length ? '' : `<button type="button" class="btn btn-primary" onclick="App.runSourceUpdate(${Number(modelId)})">Create new version</button>`}
       </div></div>`;
   },
 

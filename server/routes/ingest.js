@@ -19,7 +19,7 @@ const limiter = rateLimit({
 
 const fail = (res, e) => {
   if (!e.status) console.error('[ingest]', e);
-  res.status(e.status || 500).json({ error: e.status ? e.message : 'Import failed' });
+  res.status(e.status || 500).json({ error: e.status ? e.message : 'Import failed', ...(e.code && e.status ? { code: e.code } : {}) });
 };
 
 /** Public fields only (drops provider-private data). */
@@ -54,7 +54,7 @@ async function importFromUrl(userId, body) {
   U.saveSnapshot(r.body.id, p, r.body.name);
   let job_id = null;
   if (body.download_files !== false && (p.files.length || p.coverUrl)) job_id = startJob(r.body.id, p.url, Array.isArray(body.file_ids) ? body.file_ids.map(String) : null);
-  return { status: 201, body: { model: r.body, job_id, files_need_token: p.filesNeedToken } };
+  return { status: 201, body: { model: r.body, job_id } };
 }
 
 router.post('/', limiter, authenticate, requireUploader, async (req, res) => {

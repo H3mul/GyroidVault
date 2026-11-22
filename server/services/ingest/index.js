@@ -25,12 +25,13 @@ function resolveProvider(url) {
 async function preview(url) {
   url = String(url || '').trim();
   const provider = resolveProvider(url);
+  if (provider.requiresToken && !provider.hasToken()) throw provider.tokenRequired(); // fail first, before DNS or any request
   await assertPublicUrl(url);
   let raw;
   try {
     raw = await provider.fetchMeta(url);
   } catch (e) {
-    if (provider === generic || e.status === 400 || e.code === 'not_found' || e.code === 'rate_limited') throw e;
+    if (provider === generic || provider.requiresToken || e.status === 400 || e.code === 'not_found' || e.code === 'rate_limited') throw e;
     // dedicated provider failed: try plain page metadata, but report the provider's (more specific) error if that fails too
     raw = await generic.fetchMeta(url).catch(() => { throw e; });
     raw.files = [];
@@ -40,7 +41,6 @@ async function preview(url) {
   if (!out.title) throw new IngestError('Could not read a title from that page');
   out.site = site;
   out.tags = [...new Set([`source:${site}`, ...out.tags])];
-  out.filesNeedToken = !!raw._needsToken;
   Object.defineProperty(out, '_raw', { value: raw });
   Object.defineProperty(out, '_provider', { value: provider });
   return out;

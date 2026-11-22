@@ -4,7 +4,7 @@
  */
 const assert = require('assert');
 // DNS: everything public except *.internal.test
-require('dns').promises.lookup = async host => [{ address: host.endsWith('internal.test') ? '10.0.0.5' : '93.184.216.34', family: 4 }];
+require('dns').promises.lookup = async host => (module.exports.state.dnsLookups++, [{ address: host.endsWith('internal.test') ? '10.0.0.5' : '93.184.216.34', family: 4 }]);
 
 // Fixtures
 const STL = Buffer.concat([Buffer.alloc(80, 0x20), Buffer.from([0, 0, 0, 0])]);
@@ -20,7 +20,7 @@ const THING_HTML = `<html><head><title>x</title><meta property="og:title" conten
 
 // Mutable server state so tests can simulate upstream edits and outages.
 // mode: null | 'rate_limit' | 'not_found' | 'offline' (applies to Printables metadata queries, not file downloads)
-const state = { calls: [], mode: null, coverFail: false, lastUA: null, models: { 99: printable }, files: { 1: STL, 2: EXE } };
+const state = { dnsLookups: 0, calls: [], mode: null, coverFail: false, tvChallenge: false, lastUA: null, models: { 99: printable }, files: { 1: STL, 2: EXE } };
 
 /** Registers a Printables model with files [{id,name,body}] and returns its fixture (mutate it to simulate edits). */
 function addModel(id, files, extra = {}) {
@@ -63,8 +63,10 @@ global.fetch = async (url, opts = {}) => {
   if (fm) return state.files[fm[1]] ? new Response(state.files[fm[1]]) : new Response('missing', { status: 404 });
   if (url.startsWith('https://media.printables.com/')) return state.coverFail ? new Response('challenge', { status: 403, headers: { 'cf-mitigated': 'challenge' } }) : new Response(JPG);
   if (url === 'https://www.thingiverse.com/thing:5') return new Response(THING_HTML);
+  if (url.startsWith('https://api.thingiverse.com/') && opts.headers.authorization !== 'Bearer tok') {
+    return state.tvChallenge ? new Response('x', { status: 403, headers: { 'cf-mitigated': 'challenge' } }) : json({ error: 'Unauthorized access', type: 'INVALID_TOKEN' }, 401);
+  }
   if (url === 'https://api.thingiverse.com/things/5') {
-    assert.strictEqual(opts.headers.authorization, 'Bearer tok');
     return json({ name: 'TV thing', description: 'd', tags: [{ name: 'Boat' }], default_image: { url: 'https://cdn.example.com/c.jpg' } });
   }
   if (url === 'https://api.thingiverse.com/things/5/files') return json([{ id: 7, name: 'boat.stl', size: STL.length, direct_url: 'https://cdn.example.com/boat.stl' }]);
