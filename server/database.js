@@ -218,6 +218,7 @@ async function initDatabase() {
       model_id INTEGER NOT NULL,
       source_url TEXT NOT NULL,
       kind TEXT NOT NULL DEFAULT 'import',    -- import|update
+      force INTEGER NOT NULL DEFAULT 0,        -- update jobs: 1 = re-import (download every file again)
       result_model_id INTEGER,                 -- update jobs: the version row they created
       status TEXT NOT NULL DEFAULT 'pending', -- pending|running|completed|partial|failed
       selected TEXT,                           -- JSON array of provider file ids, null = all
@@ -293,6 +294,7 @@ async function initDatabase() {
     }
     const jCols = all("PRAGMA table_info(ingest_jobs)");
     if (jCols.length && !jCols.some(c => c.name === 'kind')) db.run("ALTER TABLE ingest_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'import'");
+    if (jCols.length && !jCols.some(c => c.name === 'force')) db.run('ALTER TABLE ingest_jobs ADD COLUMN force INTEGER NOT NULL DEFAULT 0');
     if (jCols.length && !jCols.some(c => c.name === 'result_model_id')) db.run('ALTER TABLE ingest_jobs ADD COLUMN result_model_id INTEGER');
     const pCols = all("PRAGMA table_info(print_history)");
     const prjCols = all("PRAGMA table_info(projects)");

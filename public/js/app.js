@@ -3178,13 +3178,20 @@ const App = {
     } catch (e) { this.toast(`Could not read the source: ${e.message}`, 'error'); }
   },
 
-  async runSourceUpdate(modelId) {
+  async openSourceReimport(modelId) {
+    try {
+      const pv = await API.sourceUpdatePreview(modelId);
+      this.openModal('Re-import from source', UI.sourceUpdateDialog(pv, modelId, true));
+    } catch (e) { this.toast(`Could not read the source: ${e.message}`, 'error'); }
+  },
+
+  async runSourceUpdate(modelId, force = false) {
     const ids = Array.from(document.querySelectorAll('input[name="update_files"]:checked')).map(c => c.value);
     if (!ids.length) return this.toast('Select at least one file', 'error');
     try {
-      await API.sourceUpdate(modelId, ids);
+      await API.sourceUpdate(modelId, ids, force);
       this.closeModal();
-      this.toast('Update started: a new version is being built');
+      this.toast(force ? 'Re-import started: a new version is being built' : 'Update started: a new version is being built');
       this.refreshIngestBanner(modelId);
     } catch (e) { this.toast(e.message, 'error'); }
   },

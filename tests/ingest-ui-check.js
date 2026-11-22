@@ -219,7 +219,9 @@ const PREVIEW = { title: 'Bracket', description: 'Desc', url: 'https://www.print
     assert.strictEqual(JSON.stringify(calls.map(c => [c[0], c[1]])), JSON.stringify([
       ['/api/ingest/models/4/source', 'GET'], ['/api/ingest/models/4/check', 'POST'], ['/api/ingest/models/4/track', 'POST'], ['/api/ingest/models/4/dismiss', 'POST'],
       ['/api/ingest/models/4/update-preview', 'POST'], ['/api/ingest/models/4/update', 'POST'], ['/api/ingest/models/4/refresh-metadata', 'POST'], ['/api/ingest/check-all', 'POST']]));
-    assert.deepStrictEqual(JSON.parse(calls[5][2]), { file_ids: ['stl:1'] });
+    assert.deepStrictEqual(JSON.parse(calls[5][2]), { file_ids: ['stl:1'], force: false });
+    await API.sourceUpdate(4, ['stl:1'], true);
+    assert.deepStrictEqual(JSON.parse(calls[calls.length - 1][2]), { file_ids: ['stl:1'], force: true });
   });
 
   await check('Source banner: nothing for unsupported sources; Track button when untracked; quiet line when current', () => {
@@ -314,6 +316,39 @@ const PREVIEW = { title: 'Bracket', description: 'Desc', url: 'https://www.print
     assert.strictEqual(JSON.stringify(sent), JSON.stringify([5, ['stl:1', 'stl:3']])); assert.ok(closed); assert.strictEqual(tracked, 5);
     API.sourceUpdatePreview = async () => { throw new Error('Site answered HTTP 403'); }; App.__toasts = [];
     await App.openSourceUpdate(5); assert.ok(lastToast()[0].includes('HTTP 403'));
+  });
+  await check('Re-import button: offered in every tracked state and for untracked supported models, not when the source is gone', () => {
+    for (const state of ['current', 'outdated', 'metadata_changed', 'unknown_changed']) {
+      assert.ok(UI.sourceBanner(info({ state, summary: {} }), 7).includes('App.openSourceReimport(7)'), state);
+    }
+    assert.ok(UI.sourceBanner({ tracked: false, supported: true, site: 'printables' }, 7).includes('App.openSourceReimport(7)'));
+    assert.ok(!UI.sourceBanner(info({ state: 'source_unavailable' }), 7).includes('openSourceReimport'));
+    assert.ok(UI.sourceBanner(info({ state: 'outdated', dismissed: true, summary: {} }), 7).includes('App.openSourceReimport(7)'), 'still offered after dismissing an update');
+  });
+  await check('Re-import dialog: states that everything is downloaded again, force-mode button; the update dialog is unchanged', () => {
+    const pv = { files: [{ id: 'stl:1', name: 'a.stl', size: 1, status: 'unchanged' }], removed: [], metaDiff: {} };
+    const re = UI.sourceUpdateDialog(pv, 9, true);
+    assert.ok(re.includes('downloads every selected file again') && re.includes('even if nothing changed'));
+    assert.ok(re.includes('App.runSourceUpdate(9,true)') && re.includes('Re-import as new version') && !re.includes('Create new version'));
+    const up = UI.sourceUpdateDialog(pv, 9);
+    assert.ok(up.includes('App.runSourceUpdate(9)') && up.includes('Create new version') && !up.includes('Re-import as new version'));
+  });
+  await check('Re-import flow: opens its own dialog; submitting sends force=true and says re-import; the normal update sends force=false', async () => {
+    let modal = null, sent = null; App.__toasts = [];
+    App.openModal = (t, h) => { modal = [t, h]; }; App.closeModal = () => {}; App.refreshIngestBanner = () => {};
+    API.sourceUpdatePreview = async () => ({ files: [{ id: 'stl:1', name: 'a.stl', size: 1, status: 'unchanged' }], removed: [], metaDiff: {} });
+    await App.openSourceReimport(5);
+    assert.strictEqual(modal[0], 'Re-import from source'); assert.ok(modal[1].includes('runSourceUpdate(5,true)'));
+    const realQ = sandbox.document.querySelectorAll;
+    sandbox.document.querySelectorAll = sel => (sel.includes('update_files') ? [{ value: 'stl:1' }] : []);
+    API.sourceUpdate = async (id, ids, force) => { sent = [id, ids, force]; return { job_id: 1 }; };
+    await App.runSourceUpdate(5, true);
+    assert.strictEqual(JSON.stringify(sent), JSON.stringify([5, ['stl:1'], true])); assert.ok(App.__toasts[App.__toasts.length - 1][0].startsWith('Re-import started'));
+    await App.runSourceUpdate(5);
+    sandbox.document.querySelectorAll = realQ;
+    assert.strictEqual(sent[2], false); assert.ok(App.__toasts[App.__toasts.length - 1][0].startsWith('Update started'));
+    API.sourceUpdatePreview = async () => { throw new Error('Site answered HTTP 403'); }; App.__toasts = [];
+    await App.openSourceReimport(5); assert.ok(App.__toasts[0][0].includes('HTTP 403'));
   });
   await check('Import banner for update jobs: wording, retry label, and navigation to the created version when the job finishes', async () => {
     App.refreshIngestBanner = realRefreshIngest; // an earlier test stubs it

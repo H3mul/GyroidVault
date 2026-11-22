@@ -53,14 +53,14 @@ async function updatePreview(modelId) {
   };
 }
 
-function startUpdateJob(modelId, selected, userId) {
+function startUpdateJob(modelId, selected, userId, force = false) {
   const model = get('SELECT * FROM models WHERE id=?', [modelId]);
   if (!model) throw new IngestError('Model not found', 404);
   const row = U.ensureRow(model);
   if (get("SELECT id FROM ingest_jobs WHERE model_id=? AND kind='update' AND status IN ('pending','running')", [modelId])) {
     throw new IngestError('An update is already running for this model', 409);
   }
-  const r = run("INSERT INTO ingest_jobs (model_id, source_url, kind, selected) VALUES (?,?,'update',?)", [modelId, row.source_url, selected ? JSON.stringify(selected) : null]);
+  const r = run("INSERT INTO ingest_jobs (model_id, source_url, kind, selected, force) VALUES (?,?,'update',?,?)", [modelId, row.source_url, selected ? JSON.stringify(selected) : null, force ? 1 : 0]);
   jobs.enqueue(() => runUpdateJob(r.lastId, userId), r.lastId);
   return r.lastId;
 }
@@ -89,7 +89,8 @@ async function runUpdateJob(jobId, userId) {
     const provider = p._provider, raw = p._raw;
     if (!p.files.length) return fail('The source lists no downloadable files.');
     const c = U.classify(row, p);
-    const unchanged = new Set(c.unchanged.map(f => f.name));
+    // A re-import trusts nothing local: every file is fetched again instead of being copied from the previous version
+    const unchanged = new Set(job.force ? [] : c.unchanged.map(f => f.name));
     const sel = job.selected ? new Set(JSON.parse(job.selected)) : null;
     const oldFiles = all('SELECT * FROM files WHERE model_id=? AND (is_archive_entry IS NULL OR is_archive_entry=0)', [old.id]);
 

@@ -257,6 +257,30 @@ async function waitJob(session, id) {
     assert.strictEqual((await req(`/api/models/${track.v2}`, { session: owner })).data.files.length, filesBefore, 'old version untouched by the retry');
     assert.notStrictEqual((await req(`/api/models/${track.rootId}`, { session: owner })).data.latest_version.id, track.v2, 'a new version now exists');
   });
+  await check('Re-import over HTTP: force on an up-to-date model creates a new version; a failed forced run retries as a forced run', async () => {
+    setStub({ models: { 203: mdl(203, [[4001, 'r.stl']]) }, files: { 4001: 'STL' } });
+    const imp = (await post('/api/ingest', { url: 'https://www.printables.com/model/203-r' })).data;
+    await waitJob(owner, imp.job_id);
+    assert.strictEqual((await post(`/api/ingest/models/${imp.model.id}/check`, {})).data.state, 'current');
+    const up = await post(`/api/ingest/models/${imp.model.id}/update`, { force: true });
+    assert.strictEqual(up.status, 202);
+    const job = await waitJob(owner, up.data.job_id);
+    assert.deepStrictEqual([job.status, job.force, job.kind], ['completed', 1, 'update']);
+    const v = (await req(`/api/models/${job.result_model_id}`, { session: owner })).data;
+    assert.deepStrictEqual(v.files.map(f => f.original_name).sort(), ['cover.jpg', 'r.stl']);
+    assert.strictEqual(v.parent_id, imp.model.id);
+    // failing forced run, then retry once the file is back
+    setStub({ files: { 4001: null } });
+    const bad = await waitJob(owner, (await post(`/api/ingest/models/${job.result_model_id}/update`, { force: true })).data.job_id);
+    assert.strictEqual(bad.status, 'failed');
+    setStub({ files: { 4001: 'STL' } });
+    const rt = await post(`/api/ingest/jobs/${bad.id}/retry`, {});
+    assert.strictEqual(rt.status, 202);
+    const again = await waitJob(owner, rt.data.job_id);
+    assert.deepStrictEqual([again.kind, again.force, again.status], ['update', 1, 'completed']);
+    const plain = await post(`/api/ingest/models/${imp.model.id}/update`, { force: 'yes' });
+    assert.strictEqual(plain.status, 202); assert.strictEqual((await waitJob(owner, plain.data.job_id)).force, 0, 'only a literal true forces');
+  });
   await check('Dismiss clears the library flag; refresh-metadata returns state; check-all is admin-only', async () => {
     setStub({ models: { 201: mdl(201, [[2001, 'x.stl']]) }, files: { 2001: 'STL' } });
     const id = (await post('/api/ingest', { url: 'https://www.printables.com/model/201-y' })).data;

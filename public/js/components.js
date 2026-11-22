@@ -1065,7 +1065,7 @@ const UI = {
     const btn = (label, fn, primary) => `<button class="btn ${primary ? 'btn-primary' : 'btn-secondary'} btn-xs" onclick="App.${fn}(${Number(modelId)})">${label}</button>`;
     const panel = (color, inner) => `<div class="glass-panel" style="padding:12px 16px;margin-bottom:16px;border-left:3px solid var(--accent-${color})">${inner}</div>`;
     const muted = inner => `<div style="font-size:.75rem;color:var(--text-muted);margin-bottom:12px">${inner}</div>`;
-    if (!info.tracked) return muted(`Source: ${site}. ${btn('Track updates', 'trackSource')}`);
+    if (!info.tracked) return muted(`Source: ${site}. ${btn('Track updates', 'trackSource')} ${btn('Re-import…', 'openSourceReimport')}`);
     const s = info.summary || {};
     const n = a => (a || []).length;
     if (info.state === 'source_unavailable') {
@@ -1078,17 +1078,17 @@ const UI = {
       return panel('cyan', `<strong>${info.state === 'outdated' ? 'Update available' : 'Possibly updated'} on ${site}</strong>
         <div style="font-size:.85rem;margin-top:4px">${UI.esc(detail)}</div>
         <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-          ${btn('Update from source…', 'openSourceUpdate', true)} ${btn('Dismiss', 'dismissSource')} ${btn('Check now', 'checkSourceNow')} ${link}
+          ${btn('Update from source…', 'openSourceUpdate', true)} ${btn('Dismiss', 'dismissSource')} ${btn('Check now', 'checkSourceNow')} ${btn('Re-import…', 'openSourceReimport')} ${link}
         </div>`);
     }
     if (info.state === 'metadata_changed' && !info.dismissed) {
       return panel('cyan', `<strong>Title or description changed on ${site}</strong> <span style="font-size:.8rem">(files are the same)</span>
-        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">${btn('Refresh metadata', 'refreshSourceMeta', true)} ${btn('Dismiss', 'dismissSource')} ${btn('Check now', 'checkSourceNow')} ${link}</div>`);
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">${btn('Refresh metadata', 'refreshSourceMeta', true)} ${btn('Dismiss', 'dismissSource')} ${btn('Check now', 'checkSourceNow')} ${btn('Re-import…', 'openSourceReimport')} ${link}</div>`);
     }
-    return muted(`Tracking ${site} for updates${info.last_checked_at ? ` · last checked ${UI.esc(info.last_checked_at)} UTC` : ''}${info.last_error ? ` · last check failed: ${UI.esc(info.last_error)}` : ''} · ${btn('Check now', 'checkSourceNow')} ${link}`);
+    return muted(`Tracking ${site} for updates${info.last_checked_at ? ` · last checked ${UI.esc(info.last_checked_at)} UTC` : ''}${info.last_error ? ` · last check failed: ${UI.esc(info.last_error)}` : ''} · ${btn('Check now', 'checkSourceNow')} ${btn('Re-import…', 'openSourceReimport')} ${link}`);
   },
 
-  sourceUpdateDialog(pv, modelId) {
+  sourceUpdateDialog(pv, modelId, force = false) {
     const kb = n => n ? ` (${n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'})` : '';
     const badge = { new: 'new', changed: 'changed', unchanged: 'unchanged', unknown: '' };
     const note = t => `<p style="font-size:.85rem;color:var(--text-muted)">${t}</p>`;
@@ -1096,7 +1096,7 @@ const UI = {
     const meta = [d.title && 'title', d.description && 'description', d.tags && 'tags'].filter(Boolean);
     const body = !pv.files.length
       ? note('The source lists no downloadable files.')
-      : `${note('A new version keeps your current version untouched. Unchanged files are copied from it; only new or changed files are downloaded.')}
+      : `${note(force ? 'Re-import creates a new version and downloads every selected file again from the source, even if nothing changed. Your current version stays untouched.' : 'A new version keeps your current version untouched. Unchanged files are copied from it; only new or changed files are downloaded.')}
         ${pv.estimate ? note('This model was added before update tracking, so what changed is an estimate.') : ''}
         <div class="form-label">Files in the new version</div>
         ${pv.files.map(f => `<label class="form-checkbox" style="display:block"><input type="checkbox" name="update_files" value="${UI.esc(f.id)}" checked> ${UI.esc(f.name)}${kb(f.size)} <span class="badge" style="font-size:.6rem">${UI.esc(badge[f.status] || '')}</span></label>`).join('')}
@@ -1105,7 +1105,7 @@ const UI = {
       ${meta.length ? note(`Also changed on the source: ${meta.join(', ')}. Anything you edited yourself is kept.`) : ''}
       <div class="form-actions">
         <button type="button" class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-        ${!pv.files.length ? '' : `<button type="button" class="btn btn-primary" onclick="App.runSourceUpdate(${Number(modelId)})">Create new version</button>`}
+        ${!pv.files.length ? '' : `<button type="button" class="btn btn-primary" onclick="App.runSourceUpdate(${Number(modelId)}${force ? ',true' : ''})">${force ? 'Re-import as new version' : 'Create new version'}</button>`}
       </div></div>`;
   },
 

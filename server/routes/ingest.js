@@ -103,7 +103,7 @@ router.post('/jobs/:id/retry', limiter, authenticate, requireUploader, (req, res
   if (['pending', 'running'].includes(job.status)) return res.status(409).json({ error: 'Job is still running' });
   const selected = job.selected ? JSON.parse(job.selected) : null;
   if (job.kind === 'update' && !job.result_model_id) { // nothing was created: run the update again
-    try { return res.status(202).json({ job_id: sync.startUpdateJob(job.model_id, selected, req.user.id) }); } catch (e) { return fail(res, e); }
+    try { return res.status(202).json({ job_id: sync.startUpdateJob(job.model_id, selected, req.user.id, !!job.force) }); } catch (e) { return fail(res, e); }
   }
   // import jobs, and partial updates (fill in the missing files of the version they created)
   const target = job.kind === 'update' ? job.result_model_id : job.model_id;
@@ -143,7 +143,7 @@ router.post('/models/:id/update-preview', limiter, authenticate, requireUploader
 router.post('/models/:id/update', limiter, authenticate, requireUploader, guard((req, res) => {
   if (!ownedModel(req, res)) return;
   const ids = Array.isArray(req.body?.file_ids) ? req.body.file_ids.map(String) : null;
-  res.status(202).json({ job_id: sync.startUpdateJob(Number(req.params.id), ids, req.user.id) });
+  res.status(202).json({ job_id: sync.startUpdateJob(Number(req.params.id), ids, req.user.id, req.body?.force === true) });
 }));
 router.post('/models/:id/refresh-metadata', limiter, authenticate, requireUploader, guard(async (req, res) => {
   if (!ownedModel(req, res)) return;

@@ -122,7 +122,7 @@ const API = {
   sourceTrack(id) { return this.request(`/api/ingest/models/${id}/track`, { method: 'POST', body: '{}' }); },
   sourceDismiss(id) { return this.request(`/api/ingest/models/${id}/dismiss`, { method: 'POST', body: '{}' }); },
   sourceUpdatePreview(id) { return this.request(`/api/ingest/models/${id}/update-preview`, { method: 'POST', body: '{}' }); },
-  sourceUpdate(id, file_ids) { return this.request(`/api/ingest/models/${id}/update`, { method: 'POST', body: JSON.stringify({ file_ids }) }); },
+  sourceUpdate(id, file_ids, force = false) { return this.request(`/api/ingest/models/${id}/update`, { method: 'POST', body: JSON.stringify({ file_ids, force }) }); },
   sourceRefreshMetadata(id) { return this.request(`/api/ingest/models/${id}/refresh-metadata`, { method: 'POST', body: '{}' }); },
   checkAllSources() { return this.request('/api/ingest/check-all', { method: 'POST', body: '{}' }); },
   ingestRetry(jobId) { return this.request(`/api/ingest/jobs/${jobId}/retry`, { method: 'POST' }); },

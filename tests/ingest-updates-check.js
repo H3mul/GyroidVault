@@ -260,6 +260,36 @@ const rejects = (p, status) => p.then(() => assert.fail('expected rejection'), e
     assert.deepStrictEqual(names(j.result_model_id), ['a.stl', 'b.stl']);
     assert.strictEqual(j.detail.find(d => d.name === 'cover image').status, 'warning');
   });
+  await check('Re-import of an up-to-date model: new version with every file downloaded again (an ordinary update would copy them); old version untouched', async () => {
+    addModel(85, [{ id: 91, name: 'a.stl', body: STL }, { id: 92, name: 'b.stl', body: STL2 }]);
+    const id85 = await importModel(85);
+    assert.strictEqual((await U.checkModel(id85)).state, 'current');
+    state.calls = [];
+    const plain = await waitJob(S.startUpdateJob(id85, null, null));
+    assert.strictEqual(plain.status, 'completed');
+    assert.ok(!state.calls.some(u => /\/f\/9[12]\.stl/.test(u)), 'ordinary update copies unchanged files');
+    state.calls = [];
+    const j = await waitJob(S.startUpdateJob(id85, null, null, true));
+    assert.strictEqual(j.status, 'completed', JSON.stringify(j)); assert.strictEqual(j.force, 1);
+    assert.ok(state.calls.some(u => u.includes('/f/91.stl')) && state.calls.some(u => u.includes('/f/92.stl')), 'every file fetched again');
+    assert.deepStrictEqual(names(j.result_model_id), ['a.stl', 'b.stl', 'cover.jpg']);
+    assert.deepStrictEqual(names(id85), ['a.stl', 'b.stl', 'cover.jpg'], 'old version untouched');
+    assert.strictEqual(familyLatest(id85), j.result_model_id);
+    assert.strictEqual(srcState(j.result_model_id).state, 'current');
+  });
+  await check('Re-import of an untracked model with a supported source link: baselined and re-imported; failure creates nothing', async () => {
+    addModel(86, [{ id: 93, name: 'a.stl', body: STL }]);
+    const id = run("INSERT INTO models (name, source_url, description) VALUES ('Hand linked','https://www.printables.com/model/86-x','mine')").lastId;
+    assert.ok(!srcState(id));
+    const j = await waitJob(S.startUpdateJob(id, null, null, true));
+    assert.strictEqual(j.status, 'completed', JSON.stringify(j));
+    assert.ok(srcState(id), 'now tracked'); assert.deepStrictEqual(names(j.result_model_id), ['a.stl', 'cover.jpg']);
+    assert.strictEqual(get('SELECT description d FROM models WHERE id=?', [j.result_model_id]).d, 'mine', 'user text kept');
+    const before = newModelsCount(); delete state.files[93];
+    const bad = await waitJob(S.startUpdateJob(id, null, null, true));
+    state.files[93] = STL;
+    assert.strictEqual(bad.status, 'failed'); assert.strictEqual(bad.force, 1); assert.strictEqual(newModelsCount(), before);
+  });
   await check('Selecting a subset of remote files limits what the new version contains', async () => {
     const m83 = addModel(83, [{ id: 51, name: 'p.stl', body: STL }, { id: 52, name: 'q.stl', body: STL2 }]);
     const id83 = await importModel(83);
