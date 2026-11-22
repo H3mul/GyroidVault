@@ -12,6 +12,8 @@ const { spawn } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gv-http-'));
+const stubFile = path.join(tmp, 'stub-state.json');
+const setStub = o => fs.writeFileSync(stubFile, JSON.stringify(o));
 let passed = 0, base, srv;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -47,7 +49,7 @@ async function waitJob(session, id) {
   base = `http://127.0.0.1:${port}`;
   srv = spawn('node', ['-r', path.join(__dirname, 'helpers/ingest-stubs.js'), 'server/index.js'], {
     cwd: ROOT, stdio: 'ignore',
-    env: { ...process.env, DATA_DIR: tmp, LIBRARY_PATH: path.join(tmp, 'library'), PORT: String(port), THINGIVERSE_TOKEN: '', INGEST_RATE_LIMIT_PER_MIN: '60' },
+    env: { ...process.env, DATA_DIR: tmp, LIBRARY_PATH: path.join(tmp, 'library'), PORT: String(port), THINGIVERSE_TOKEN: '', INGEST_RATE_LIMIT_PER_MIN: '300', STUB_STATE_FILE: stubFile },
   });
   for (let i = 0; i < 60; i++) { try { if ((await fetch(base + '/healthz')).ok) break; } catch {} await sleep(250); }
 
@@ -56,6 +58,7 @@ async function waitJob(session, id) {
   await req('/api/settings/system', { method: 'POST', session: admin, body: { open_registration: 'true' } });
   const owner = await login('owner_i', 'owner_i@test.local');           // default role: can upload
   const viewer = await login('viewer_i', 'viewer_i@test.local', 'viewer', admin);
+  const stranger = await login('stranger_i', 'stranger_i@test.local');   // uploader who owns nothing (the auth limiter caps registrations)
   const url = 'https://www.printables.com/model/99-test-bracket';
   const post = (p, body, session = owner) => req(p, { method: 'POST', body, session });
 
@@ -154,14 +157,14 @@ async function waitJob(session, id) {
     assert.ok(Array.isArray(latest.data.detail));
     assert.strictEqual((await req(`/api/ingest/models/${modelId + 999}/job`, { session: owner })).data, null);
     assert.strictEqual((await req('/api/ingest/jobs/9999', { session: owner })).status, 404);
-    const other = await login('other_i', 'other_i@test.local');
+    const other = stranger;
     assert.strictEqual((await req(`/api/ingest/jobs/${jobId}`, { session: other })).status, 403);
     assert.strictEqual((await req(`/api/ingest/jobs/${jobId}`, { session: admin })).status, 200);
     assert.strictEqual((await post(`/api/ingest/jobs/${jobId}/retry`, {}, other)).status, 403);
   });
 
   await check('/download: 404 unknown model, 403 for non-owner, 400 for bad URL, 202 for owner; retry restarts a finished job', async () => {
-    const other = await login('other2_i', 'other2_i@test.local');
+    const other = stranger;
     assert.strictEqual((await post('/api/ingest/download', { model_id: 99999, url })).status, 404);
     assert.strictEqual((await post('/api/ingest/download', { model_id: modelId, url }, other)).status, 403);
     assert.strictEqual((await post('/api/ingest/download', { model_id: modelId, url: 'http://127.0.0.1/' })).status, 400);
@@ -179,9 +182,91 @@ async function waitJob(session, id) {
     assert.strictEqual((await req(`/api/ingest/jobs/${jobId}`, { session: admin })).status, 404);
   });
 
+  // ── update tracking over HTTP ──
+  const mdl = (id, files, extra = {}) => ({ id: String(id), modified: '2026-01-01T00:00:00+00:00', name: `HTTP ${id}`, summary: 's', description: '<p>d</p>', tags: [{ name: 'alpha' }],
+    image: { filePath: 'media/prints/x/c.jpg' }, stls: files.map(([i, n]) => ({ id: String(i), name: n, fileSize: 84 })), gcodes: [], slas: [], ...extra });
+  const track = { rootId: null, other: null };
+  await check('Import is tracked; GET source reports state; ownership and roles are enforced on source routes', async () => {
+    setStub({ models: { 200: mdl(200, [[1001, 'a.stl'], [1002, 'b.stl']]) }, files: { 1001: 'STL', 1002: 'STL2' } });
+    const r = await post('/api/ingest', { url: 'https://www.printables.com/model/200-x' });
+    assert.strictEqual(r.status, 201);
+    track.rootId = r.data.model.id; await waitJob(owner, r.data.job_id);
+    const s = await req(`/api/ingest/models/${track.rootId}/source`, { session: owner });
+    assert.deepStrictEqual([s.data.tracked, s.data.state, s.data.site, s.data.dismissed], [true, 'current', 'printables', false]);
+    track.other = stranger;
+    for (const [p, body] of [['check', {}], ['track', {}], ['dismiss', {}], ['update-preview', {}], ['update', {}], ['refresh-metadata', {}]]) {
+      assert.strictEqual((await post(`/api/ingest/models/${track.rootId}/${p}`, body, track.other)).status, 403, `${p} non-owner`);
+      assert.strictEqual((await post(`/api/ingest/models/${track.rootId}/${p}`, body, viewer)).status, 403, `${p} viewer`);
+      assert.strictEqual((await req(`/api/ingest/models/${track.rootId}/${p}`, { method: 'POST', body })).status, 401, `${p} anon`);
+      assert.strictEqual((await post(`/api/ingest/models/999999/${p}`, body)).status, 404, `${p} unknown model`);
+    }
+    assert.strictEqual((await req('/api/ingest/models/999999/source', { session: owner })).status, 404);
+    assert.strictEqual((await req(`/api/ingest/models/${track.rootId}/source`)).status, 401);
+  });
+  await check('Check detects a new upstream file; library shows update_state and the updates filter; preview of the tracked URL offers the update', async () => {
+    setStub({ models: { 200: mdl(200, [[1001, 'a.stl'], [1002, 'b.stl'], [1003, 'c.stl']], { modified: '2026-02-01T00:00:00+00:00' }) }, files: { 1003: 'STL' } });
+    const c = await post(`/api/ingest/models/${track.rootId}/check`, {});
+    assert.strictEqual(c.status, 200); assert.strictEqual(c.data.state, 'outdated'); assert.deepStrictEqual(c.data.summary.added.map(f => f.name), ['c.stl']);
+    const list = await req('/api/models?updates=1', { session: owner });
+    const hit = list.data.models.find(m => m.id === track.rootId);
+    assert.ok(hit && hit.update_state === 'outdated');
+    assert.ok(!(await req('/api/models', { session: owner })).data.models.some(m => m.update_state && m.id !== track.rootId), 'only this family is flagged');
+    const pv = await post('/api/ingest/preview', { url: 'https://www.printables.com/model/200-x' });
+    assert.deepStrictEqual([pv.data.existing_model.id, pv.data.update_available.state], [track.rootId, 'outdated']);
+  });
+  await check('Update preview lists file statuses; update creates a new latest version; filter clears; old version intact', async () => {
+    const pv = await post(`/api/ingest/models/${track.rootId}/update-preview`, {});
+    assert.deepStrictEqual(pv.data.files.map(f => [f.name, f.status]), [['a.stl', 'unchanged'], ['b.stl', 'unchanged'], ['c.stl', 'new']]);
+    const up = await post(`/api/ingest/models/${track.rootId}/update`, {});
+    assert.strictEqual(up.status, 202);
+    const job = await waitJob(owner, up.data.job_id);
+    assert.strictEqual(job.status, 'completed', JSON.stringify(job));
+    const root = (await req(`/api/models/${track.rootId}`, { session: owner })).data;
+    const v = (await req(`/api/models/${job.result_model_id}`, { session: owner })).data;
+    assert.deepStrictEqual(v.files.map(f => f.original_name).sort(), ['a.stl', 'b.stl', 'c.stl', 'cover.jpg']);
+    assert.strictEqual(root.files.length, 3, 'old version unchanged'); assert.strictEqual(root.latest_version.id, job.result_model_id);
+    assert.ok(!(await req('/api/models?updates=1', { session: owner })).data.models.some(m => m.id === track.rootId), 'family no longer flagged');
+    assert.strictEqual((await req(`/api/ingest/models/${job.result_model_id}/job`, { session: owner })).data.id, job.id, 'new version shows the update job');
+    track.v2 = job.result_model_id;
+  });
+  await check('Failed update over HTTP reports the reason and the previous version stays latest', async () => {
+    setStub({ models: { 200: mdl(200, [[1001, 'a.stl'], [1002, 'b.stl'], [1003, 'c.stl'], [1004, 'd.stl']], { modified: '2026-03-01T00:00:00+00:00' }) }, files: { 1004: null } });
+    const up = await post(`/api/ingest/models/${track.v2}/update`, { file_ids: ['stl:1004'] });
+    const job = await waitJob(owner, up.data.job_id);
+    assert.strictEqual(job.status, 'failed'); assert.ok(job.error);
+    assert.strictEqual((await req(`/api/models/${track.rootId}`, { session: owner })).data.latest_version.id, track.v2);
+  });
+  await check('Dismiss clears the library flag; refresh-metadata returns state; check-all is admin-only', async () => {
+    setStub({ models: { 201: mdl(201, [[2001, 'x.stl']]) }, files: { 2001: 'STL' } });
+    const id = (await post('/api/ingest', { url: 'https://www.printables.com/model/201-y' })).data;
+    await waitJob(owner, id.job_id);
+    setStub({ models: { 201: mdl(201, [[2001, 'x.stl'], [2002, 'y.stl']], { modified: '2026-02-01T00:00:00+00:00', name: 'Renamed 201' }) } });
+    assert.strictEqual((await post(`/api/ingest/models/${id.model.id}/check`, {})).data.state, 'outdated');
+    assert.strictEqual((await post(`/api/ingest/models/${id.model.id}/dismiss`, {})).data.dismissed, true);
+    assert.ok(!(await req('/api/models?updates=1', { session: owner })).data.models.some(m => m.id === id.model.id));
+    const rm = await post(`/api/ingest/models/${id.model.id}/refresh-metadata`, {});
+    assert.strictEqual(rm.status, 200); assert.strictEqual(rm.data.state, 'outdated'); assert.strictEqual(rm.data.name, 'Renamed 201');
+    assert.strictEqual((await post('/api/ingest/check-all', {}, owner)).status, 403);
+    assert.strictEqual((await post('/api/ingest/check-all', {}, admin)).status, 202);
+  });
+  await check('Transient source failure on manual check returns ok:false with the code and leaves state alone', async () => {
+    setStub({ mode: 'rate_limit' });
+    const r = await post(`/api/ingest/models/${track.v2}/check`, {});
+    assert.strictEqual(r.status, 200); assert.deepStrictEqual([r.data.ok, r.data.code], [false, 'rate_limited']);
+    setStub({});
+  });
+  await check('Track updates endpoint: refuses unsupported sources, baselines supported ones', async () => {
+    const manual = await post('/api/models', { name: 'Linked by hand', source_url: 'https://example.com/m/1' });
+    assert.strictEqual((await post(`/api/ingest/models/${manual.data.id}/track`, {})).status, 400);
+    setStub({ models: { 202: mdl(202, [[3001, 'z.stl']]) } });
+    const hand = await post('/api/models', { name: 'Hand 202', source_url: 'https://www.printables.com/model/202-z' });
+    const t = await post(`/api/ingest/models/${hand.data.id}/track`, {});
+    assert.deepStrictEqual([t.status, t.data.tracked, t.data.state], [200, true, 'current']);
+  });
+
   await check('Rate limit: bursts of ingest requests are throttled with 429', async () => {
     let limited = 0;
-    for (let i = 0; i < 90; i++) if ((await post('/api/ingest/preview', { url: 'bad' })).status === 429) limited++;
+    for (let i = 0; i < 330; i++) if ((await post('/api/ingest/preview', { url: 'bad' })).status === 429) limited++;
     assert.ok(limited > 0, 'expected at least one 429');
     // status polling must stay available while the outbound limit is exhausted
     assert.strictEqual((await req(`/api/ingest/models/1/job`, { session: owner })).status, 200);

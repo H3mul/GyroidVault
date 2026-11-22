@@ -217,6 +217,8 @@ async function initDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       model_id INTEGER NOT NULL,
       source_url TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'import',    -- import|update
+      result_model_id INTEGER,                 -- update jobs: the version row they created
       status TEXT NOT NULL DEFAULT 'pending', -- pending|running|completed|partial|failed
       selected TEXT,                           -- JSON array of provider file ids, null = all
       total INTEGER DEFAULT 0,
@@ -225,6 +227,29 @@ async function initDatabase() {
       error TEXT,
       created_at DATETIME DEFAULT (datetime('now')),
       updated_at DATETIME DEFAULT (datetime('now')),
+      FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS model_sources (
+      model_id INTEGER PRIMARY KEY,
+      site TEXT NOT NULL,
+      source_url TEXT NOT NULL,
+      remote_id TEXT,
+      remote_modified TEXT,          -- ISO timestamp reported by the site when the snapshot was taken (nullable)
+      files_fingerprint TEXT,        -- JSON [{id,name,size}] of remote files at snapshot time; NULL = unknown
+      meta_snapshot TEXT,            -- JSON {name,title,description,tags} as imported
+      state TEXT NOT NULL DEFAULT 'current', -- current|outdated|metadata_changed|unknown_changed|source_unavailable
+      summary TEXT,                  -- JSON change summary from the last check
+      remote_key TEXT,               -- hash of remote modified+files at last check (for dismissal)
+      dismissed_key TEXT,
+      last_checked_at DATETIME,
+      next_check_at DATETIME,
+      fail_count INTEGER DEFAULT 0,
+      miss_count INTEGER DEFAULT 0,
+      last_error TEXT,
+      created_at DATETIME DEFAULT (datetime('now')),
       FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE
     )
   `);
@@ -266,6 +291,9 @@ async function initDatabase() {
     if (!fCols.some(c => c.name === 'thumbnail')) {
       db.run('ALTER TABLE files ADD COLUMN thumbnail TEXT');
     }
+    const jCols = all("PRAGMA table_info(ingest_jobs)");
+    if (jCols.length && !jCols.some(c => c.name === 'kind')) db.run("ALTER TABLE ingest_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'import'");
+    if (jCols.length && !jCols.some(c => c.name === 'result_model_id')) db.run('ALTER TABLE ingest_jobs ADD COLUMN result_model_id INTEGER');
     const pCols = all("PRAGMA table_info(print_history)");
     const prjCols = all("PRAGMA table_info(projects)");
     if (!prjCols.some(c => c.name === 'visibility')) {

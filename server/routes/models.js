@@ -11,14 +11,20 @@ const { validatePathConfinement, safeUrl } = require('../middleware/security');
 const { getFileUrl, getThumbUrl, deleteModelInternal, getZipEntryBuffer, getSettingBool } = require('../utils/modelHelpers');
 
 // ─── GET /api/models ──────────────────────────────────────────────────────────
+// State of the family's latest version when an update is available and not dismissed (NULL otherwise)
+const UPDATE_STATE_SQL = `(SELECT ms.state FROM model_sources ms
+  WHERE ms.model_id = COALESCE((SELECT id FROM models WHERE parent_id=m.id ORDER BY created_at DESC, id DESC LIMIT 1), m.id)
+    AND ms.state IN ('outdated','unknown_changed') AND (ms.dismissed_key IS NULL OR ms.dismissed_key != ms.remote_key))`;
+
 router.get('/', (req, res) => {
   try {
-    const { search, category, tag, format, user, printed, sort = 'updated', order, project_id, page = 1, limit = 24 } = req.query;
+    const { search, category, tag, format, user, printed, sort = 'updated', order, project_id, page = 1, limit = 24, updates } = req.query;
     const needsFileCountSort = sort === 'files';
     const needsPrintCountSort = sort === 'prints';
     let query = `SELECT m.*, c.name as category_name, c.color as category_color, u.username as uploader_name,
       (SELECT id FROM models WHERE parent_id=m.id ORDER BY created_at DESC, id DESC LIMIT 1) as latest_version_id,
-      (SELECT COUNT(*) FROM models WHERE parent_id=m.id) as version_count
+      (SELECT COUNT(*) FROM models WHERE parent_id=m.id) as version_count,
+      ${UPDATE_STATE_SQL} as update_state
       ${needsFileCountSort ? ',(SELECT COUNT(*) FROM files WHERE model_id=m.id) as file_count' : ''}
       ${needsPrintCountSort ? ',(SELECT COUNT(*) FROM print_history WHERE model_id=m.id) as print_count' : ''}
       FROM models m
@@ -27,6 +33,8 @@ router.get('/', (req, res) => {
     
     const conds = [], params = [];
     
+    if (updates === '1' || updates === 'true') conds.push(`${UPDATE_STATE_SQL} IS NOT NULL`);
+
     // Filter out versions in main view
     if (!project_id) {
       conds.push("m.parent_id IS NULL");
@@ -418,6 +426,18 @@ router.put('/:id/preview-file', authenticate, (req, res) => {
 });
 
 // ─── POST /api/models/:id/versions ───────────────────────────────────────────
+/**
+ * Inserts a child version in the family of rootId. Only name/description/category are required;
+ * source updates also pass print_tips, custom_meta and source_url. Returns the new model id.
+ */
+function createVersionRecord(rootId, f, userId) {
+  const r = run(`
+    INSERT INTO models (name, description, category_id, print_tips, custom_meta, source_url, user_id, parent_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [f.name, f.description || '', f.category_id || null, f.print_tips || '', f.custom_meta || '{}', f.source_url || '', userId, rootId]);
+  return r.lastId;
+}
+
 router.post('/:id/versions', authenticate, (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -426,20 +446,20 @@ router.post('/:id/versions', authenticate, (req, res) => {
 
     const rootId = parent.parent_id || parent.id;
     const { name, description } = req.body;
-    
-    const r = run(`
-      INSERT INTO models (name, description, category_id, user_id, parent_id) 
-      VALUES (?, ?, ?, ?, ?)`, 
-      [name || `${parent.name} (New Version)`, description || parent.description, parent.category_id, req.user.id, rootId]
-    );
-    
+
+    const newId = createVersionRecord(rootId, {
+      name: name || `${parent.name} (New Version)`,
+      description: description || parent.description,
+      category_id: parent.category_id,
+    }, req.user.id);
+
     // Copy tags
     const tags = all('SELECT tag_id FROM model_tags WHERE model_id = ?', [id]);
     for (const t of tags) {
-      run('INSERT INTO model_tags (model_id, tag_id) VALUES (?, ?)', [r.lastId, t.tag_id]);
+      run('INSERT INTO model_tags (model_id, tag_id) VALUES (?, ?)', [newId, t.tag_id]);
     }
 
-    res.status(201).json({ id: r.lastId });
+    res.status(201).json({ id: newId });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed to create version' }); }
 });
 
@@ -959,3 +979,4 @@ module.exports = router;
 module.exports.createModelRecord = createModelRecord;
 module.exports.addFilesToModel = addFilesToModel;
 module.exports.attachTags = attachTags;
+module.exports.createVersionRecord = createVersionRecord;

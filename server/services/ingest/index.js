@@ -30,7 +30,7 @@ async function preview(url) {
   try {
     raw = await provider.fetchMeta(url);
   } catch (e) {
-    if (provider === generic || e.status === 400) throw e;
+    if (provider === generic || e.status === 400 || e.code === 'not_found' || e.code === 'rate_limited') throw e;
     // dedicated provider failed: try plain page metadata, but report the provider's (more specific) error if that fails too
     raw = await generic.fetchMeta(url).catch(() => { throw e; });
     raw.files = [];

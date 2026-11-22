@@ -24,12 +24,20 @@ const setJob = (id, f) => {
 function startJob(modelId, url, selected = null) {
   const r = run('INSERT INTO ingest_jobs (model_id, source_url, selected) VALUES (?,?,?)', [modelId, url, selected ? JSON.stringify(selected) : null]);
   const id = r.lastId;
-  queue = queue.then(() => runJob(id)).catch(e => logger.error('Ingest', `job ${id} crashed`, e));
+  enqueue(() => runJob(id), id);
   return id;
+}
+
+function enqueue(fn, id) {
+  queue = queue.then(fn).catch(e => logger.error('Ingest', `job ${id} crashed`, e));
 }
 
 /** Jobs left running by a crash/restart cannot resume; mark failed so the user can retry. */
 function recoverStaleJobs() {
+  // An update job that died after creating its version row but before adding files would leave an empty "latest" version
+  for (const j of all("SELECT result_model_id FROM ingest_jobs WHERE kind='update' AND status IN ('pending','running') AND result_model_id IS NOT NULL")) {
+    if (!get('SELECT 1 FROM files WHERE model_id=?', [j.result_model_id])) run('DELETE FROM models WHERE id=?', [j.result_model_id]);
+  }
   run("UPDATE ingest_jobs SET status='failed', error='Interrupted by server restart', updated_at=datetime('now') WHERE status IN ('pending','running')");
 }
 
@@ -47,6 +55,15 @@ async function fetchOne(provider, raw, file, name, limit) {
   const { url, headers } = await provider.resolveFile(raw, file);
   const tmp = path.join(UPLOADS_DIR, `ingest-${Date.now()}-${crypto.randomBytes(6).toString('hex')}${path.extname(name).toLowerCase()}`);
   const size = await downloadToFile(url, tmp, limit, headers);
+  return { path: tmp, originalname: name, size };
+}
+
+/** Downloads the cover image to a temp file; returns an addFilesToModel descriptor. */
+async function stageCover(coverUrl) {
+  const ext = path.extname(new URL(coverUrl).pathname).toLowerCase();
+  const name = `cover${['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext) ? ext : '.jpg'}`;
+  const tmp = path.join(UPLOADS_DIR, `ingest-${Date.now()}-${crypto.randomBytes(6).toString('hex')}${path.extname(name)}`);
+  const size = await downloadToFile(coverUrl, tmp, 10 * 1024 * 1024);
   return { path: tmp, originalname: name, size };
 }
 
@@ -77,12 +94,8 @@ async function runJob(jobId) {
 
     let budget = maxTotal();
     if (meta.coverUrl && !model.thumbnail) {
-      const ext = path.extname(new URL(meta.coverUrl).pathname).toLowerCase();
-      const name = `cover${['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext) ? ext : '.jpg'}`;
       try {
-        const tmp = path.join(UPLOADS_DIR, `ingest-${Date.now()}-${crypto.randomBytes(6).toString('hex')}${path.extname(name)}`);
-        const size = await downloadToFile(meta.coverUrl, tmp, 10 * 1024 * 1024);
-        addFilesToModel(model, [{ path: tmp, originalname: name, size }]);
+        addFilesToModel(model, [await stageCover(meta.coverUrl)]);
       } catch (e) { detail.push({ name: 'cover image', status: 'failed', reason: e.message }); }
     }
 
@@ -117,4 +130,4 @@ function getJob(id) {
   return j;
 }
 
-module.exports = { startJob, runJob, recoverStaleJobs, getJob };
+module.exports = { startJob, runJob, recoverStaleJobs, getJob, enqueue, setJob, fetchOne, stageCover, ensureLibraryDir, maxFile, maxTotal };

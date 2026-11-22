@@ -1,11 +1,11 @@
-const { guardedFetch, IngestError } = require('../fetchGuard');
+const { guardedFetch, codeForHttp, IngestError } = require('../fetchGuard');
 
 const API = 'https://api.printables.com/graphql/';
 const FILE_TYPES = [['stls', 'stl'], ['gcodes', 'gcode'], ['slas', 'sla']];
 
 async function gql(query) {
   const res = await guardedFetch(API, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query }) });
-  if (!res.ok) { await res.body?.cancel(); throw new IngestError(`Printables answered HTTP ${res.status}`); }
+  if (!res.ok) { await res.body?.cancel(); throw new IngestError(`Printables answered HTTP ${res.status}`, 422, codeForHttp(res.status)); }
   return JSON.parse(await res.text());
 }
 
@@ -21,11 +21,12 @@ module.exports = {
   async fetchMeta(url) {
     const id = this.parseId(url);
     if (!id) throw new IngestError('Not a Printables model URL (expected /model/<id>)', 400);
-    const { data } = await gql(`query{print(id:"${id}"){id name summary description tags{name} image{filePath} ${FILE_TYPES.map(([f]) => `${f}{id name fileSize}`).join(' ')}}}`);
+    const { data } = await gql(`query{print(id:"${id}"){id modified name summary description tags{name} image{filePath} ${FILE_TYPES.map(([f]) => `${f}{id name fileSize}`).join(' ')}}}`);
     const p = data?.print;
-    if (!p) throw new IngestError('Printables model not found (private, deleted, or wrong id)');
+    if (!p) throw new IngestError('Printables model not found (private, deleted, or wrong id)', 422, 'not_found');
     return {
       title: p.name,
+      remoteModified: p.modified,
       description: p.description || p.summary,
       url: `https://www.printables.com/model/${id}`,
       tags: p.tags,

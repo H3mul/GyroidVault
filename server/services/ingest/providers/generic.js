@@ -28,6 +28,7 @@ function parseHtml(html, url) {
     title: ld.name || meta(html, 'og:title') || htmlToText(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '', 200),
     description: ld.description || meta(html, 'og:description') || meta(html, 'description'),
     url: meta(html, 'og:url') || url,
+    remoteModified: ld.dateModified || meta(html, 'article:modified_time') || '',
     coverUrl: (typeof img === 'string' ? img : img?.url) || meta(html, 'og:image'),
     tags: Array.isArray(ld.keywords) ? ld.keywords : String(ld.keywords || kw || '').split(',').filter(Boolean),
   };

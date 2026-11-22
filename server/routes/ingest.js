@@ -6,6 +6,8 @@ const { get } = require('../database');
 const { authenticate, requireUploader } = require('../middleware/auth');
 const { preview } = require('../services/ingest');
 const { startJob, getJob } = require('../services/ingest/jobs');
+const U = require('../services/ingest/updates');
+const sync = require('../services/ingest/sync');
 const { createModelRecord } = require('./models');
 
 // Endpoints that trigger outbound requests to third-party sites get a stricter limit than the global one.
@@ -28,7 +30,9 @@ router.post('/preview', limiter, authenticate, requireUploader, async (req, res)
   try {
     const p = await preview(req.body?.url);
     const dup = p.url && get('SELECT id, name FROM models WHERE source_url=?', [p.url]);
-    res.json({ ...pub(p), existing_model: dup || null });
+    let update = null;
+    if (dup) { const si = U.sourceInfo(dup.id); if (si?.tracked && ['outdated', 'unknown_changed', 'metadata_changed'].includes(si.state)) update = { model_id: dup.id, state: si.state }; }
+    res.json({ ...pub(p), existing_model: dup || null, update_available: update });
   } catch (e) { fail(res, e); }
 });
 
@@ -47,6 +51,7 @@ async function importFromUrl(userId, body) {
     category_id: body.category_id, tags: p.tags, auto_rename: body.auto_rename,
   });
   if (r.status !== 201) return r;
+  U.saveSnapshot(r.body.id, p, r.body.name);
   let job_id = null;
   if (body.download_files !== false && (p.files.length || p.coverUrl)) job_id = startJob(r.body.id, p.url, Array.isArray(body.file_ids) ? body.file_ids.map(String) : null);
   return { status: 201, body: { model: r.body, job_id, files_need_token: p.filesNeedToken } };
@@ -66,7 +71,8 @@ router.post('/download', limiter, authenticate, requireUploader, async (req, res
     const model = get('SELECT * FROM models WHERE id=?', [Number(model_id)]);
     if (!model) return res.status(404).json({ error: 'Model not found' });
     if (req.user.role !== 'admin' && model.user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
-    await preview(url); // validates the URL and provider before queueing
+    const p = await preview(url); // validates the URL and provider before queueing
+    U.saveSnapshot(model.id, p, model.name);
     res.status(202).json({ job_id: startJob(model.id, String(url).trim(), Array.isArray(file_ids) ? file_ids.map(String) : null) });
   } catch (e) { fail(res, e); }
 });
@@ -81,7 +87,7 @@ function ownedJob(req, res) {
 
 // Latest import job for a model (null when the model was not imported from a URL)
 router.get('/models/:modelId/job', authenticate, (req, res) => {
-  const row = get('SELECT id FROM ingest_jobs WHERE model_id=? ORDER BY id DESC LIMIT 1', [Number(req.params.modelId)]);
+  const row = get('SELECT id FROM ingest_jobs WHERE model_id=? OR result_model_id=? ORDER BY id DESC LIMIT 1', [Number(req.params.modelId), Number(req.params.modelId)]);
   res.json(row ? getJob(row.id) : null);
 });
 
@@ -95,8 +101,54 @@ router.post('/jobs/:id/retry', limiter, authenticate, requireUploader, (req, res
   const job = ownedJob(req, res);
   if (!job) return;
   if (['pending', 'running'].includes(job.status)) return res.status(409).json({ error: 'Job is still running' });
-  res.status(202).json({ job_id: startJob(job.model_id, job.source_url, job.selected ? JSON.parse(job.selected) : null) });
+  const target = job.kind === 'update' && job.result_model_id ? job.result_model_id : job.model_id;
+  res.status(202).json({ job_id: startJob(target, job.source_url, job.selected ? JSON.parse(job.selected) : null) });
 });
+
+// ─── Source update tracking ──────────────────────────────────────────────────
+function ownedModel(req, res) {
+  const model = get('SELECT * FROM models WHERE id=?', [Number(req.params.id)]);
+  if (!model) { res.status(404).json({ error: 'Model not found' }); return null; }
+  if (req.user.role !== 'admin' && model.user_id !== req.user.id) { res.status(403).json({ error: 'Forbidden' }); return null; }
+  return model;
+}
+const guard = fn => async (req, res) => { try { await fn(req, res); } catch (e) { fail(res, e); } };
+
+router.get('/models/:id/source', authenticate, (req, res) => {
+  const info = U.sourceInfo(Number(req.params.id));
+  info ? res.json(info) : res.status(404).json({ error: 'Model not found' });
+});
+router.post('/models/:id/check', limiter, authenticate, requireUploader, guard(async (req, res) => {
+  if (!ownedModel(req, res)) return;
+  res.json(await U.checkModel(Number(req.params.id)));
+}));
+router.post('/models/:id/track', limiter, authenticate, requireUploader, guard(async (req, res) => {
+  if (!ownedModel(req, res)) return;
+  res.json(await U.trackModel(Number(req.params.id)));
+}));
+router.post('/models/:id/dismiss', authenticate, requireUploader, guard((req, res) => {
+  if (!ownedModel(req, res)) return;
+  U.dismiss(Number(req.params.id));
+  res.json(U.sourceInfo(Number(req.params.id)));
+}));
+router.post('/models/:id/update-preview', limiter, authenticate, requireUploader, guard(async (req, res) => {
+  if (!ownedModel(req, res)) return;
+  res.json(await sync.updatePreview(Number(req.params.id)));
+}));
+router.post('/models/:id/update', limiter, authenticate, requireUploader, guard((req, res) => {
+  if (!ownedModel(req, res)) return;
+  const ids = Array.isArray(req.body?.file_ids) ? req.body.file_ids.map(String) : null;
+  res.status(202).json({ job_id: sync.startUpdateJob(Number(req.params.id), ids, req.user.id) });
+}));
+router.post('/models/:id/refresh-metadata', limiter, authenticate, requireUploader, guard(async (req, res) => {
+  if (!ownedModel(req, res)) return;
+  res.json(await sync.refreshMetadata(Number(req.params.id)));
+}));
+router.post('/check-all', limiter, authenticate, guard(async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  U.runScheduledChecks({ force: true }).catch(e => console.error('[ingest] check-all', e)); // runs in the background; polite pacing applies
+  res.status(202).json({ started: true });
+}));
 
 module.exports = router;
 module.exports.importFromUrl = importFromUrl;

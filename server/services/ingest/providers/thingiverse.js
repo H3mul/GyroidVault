@@ -33,6 +33,7 @@ module.exports = {
       description: t.description || t.details || '',
       url: canonical,
       tags: t.tags || [],
+      remoteModified: t.modified || '',
       coverUrl: t.default_image?.url || t.thumbnail || '',
       files: (files || []).map(f => ({ id: String(f.id), name: f.name, size: f.size, _direct: f.direct_url, _api: f.download_url })),
       _thingId: id,

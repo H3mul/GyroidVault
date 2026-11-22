@@ -4,10 +4,12 @@ const fs = require('fs');
 
 const UA = 'GyroidVault-Importer/1.0 (+https://github.com/TeeCodeDev/GyroidVault)';
 class IngestError extends Error {
-  constructor(message, status = 422) { super(message); this.status = status; }
+  // code: not_found | rate_limited | blocked | http | error (callers decide whether a failure is definitive)
+  constructor(message, status = 422, code = 'error') { super(message); this.status = status; this.code = code; }
 }
 
 const MAX_REDIRECTS = 3;
+const codeForHttp = st => (st === 404 || st === 410 ? 'not_found' : st === 429 ? 'rate_limited' : st === 403 || st === 503 ? 'blocked' : 'http');
 const TIMEOUT_MS = 15000;
 
 /** True only for globally routable unicast addresses. */
@@ -87,7 +89,7 @@ async function readCapped(res, maxBytes, onChunk) {
 /** GET a text page (HTML/JSON) with a size cap. */
 async function fetchText(url, opts = {}) {
   const res = await guardedFetch(url, opts);
-  if (!res.ok) { await res.body?.cancel(); throw new IngestError(`Site answered HTTP ${res.status}`, 422); }
+  if (!res.ok) { await res.body?.cancel(); throw new IngestError(`Site answered HTTP ${res.status}`, 422, codeForHttp(res.status)); }
   return (await readCapped(res, opts.maxBytes || 1.5 * 1024 * 1024)).toString('utf8');
 }
 
@@ -107,4 +109,4 @@ async function downloadToFile(url, dest, maxBytes, headers) {
   }
 }
 
-module.exports = { isPublicIp, assertPublicUrl, guardedFetch, fetchText, downloadToFile, IngestError, UA };
+module.exports = { codeForHttp, isPublicIp, assertPublicUrl, guardedFetch, fetchText, downloadToFile, IngestError, UA };

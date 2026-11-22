@@ -49,6 +49,7 @@ function normalize(m) {
     description: htmlToText(m.description, 5000),
     url: canonicalUrl(m.url),
     tags: cleanTags(m.tags),
+    remoteModified: Number.isNaN(Date.parse(m.remoteModified)) ? '' : new Date(m.remoteModified).toISOString(),
     coverUrl: /^https:\/\//.test(m.coverUrl || '') ? m.coverUrl : '',
     files: (m.files || []).slice(0, 50).map(f => ({ id: String(f.id), name: String(f.name).replace(/[/\\]/g, '_').slice(0, 200), size: Number(f.size) || 0 })),
   };
