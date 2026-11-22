@@ -8,9 +8,12 @@ const { preview } = require('../services/ingest');
 const { startJob, getJob } = require('../services/ingest/jobs');
 const { createModelRecord } = require('./models');
 
-// Each call triggers outbound requests to third-party sites, so keep it well below the global limit.
-const limiter = rateLimit({ windowMs: 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many import requests, slow down' } });
-router.use(limiter);
+// Endpoints that trigger outbound requests to third-party sites get a stricter limit than the global one.
+// Status polling (GET) is deliberately not limited: the model page polls every 2s while a job runs.
+const limiter = rateLimit({
+  windowMs: 60 * 1000, limit: Number(process.env.INGEST_RATE_LIMIT_PER_MIN) || 20,
+  standardHeaders: true, legacyHeaders: false, message: { error: 'Too many import requests, slow down' },
+});
 
 const fail = (res, e) => {
   if (!e.status) console.error('[ingest]', e);
@@ -21,7 +24,7 @@ const fail = (res, e) => {
 const pub = p => ({ ...p });
 
 // POST /api/ingest/preview {url} -> metadata, tags (incl. source:<site>), files, cover
-router.post('/preview', authenticate, requireUploader, async (req, res) => {
+router.post('/preview', limiter, authenticate, requireUploader, async (req, res) => {
   try {
     const p = await preview(req.body?.url);
     const dup = p.url && get('SELECT id, name FROM models WHERE source_url=?', [p.url]);
@@ -49,7 +52,7 @@ async function importFromUrl(userId, body) {
   return { status: 201, body: { model: r.body, job_id, files_need_token: p.filesNeedToken } };
 }
 
-router.post('/', authenticate, requireUploader, async (req, res) => {
+router.post('/', limiter, authenticate, requireUploader, async (req, res) => {
   try {
     const r = await importFromUrl(req.user.id, req.body || {});
     res.status(r.status).json(r.body);
@@ -57,7 +60,7 @@ router.post('/', authenticate, requireUploader, async (req, res) => {
 });
 
 // POST /api/ingest/download {model_id, url, file_ids?} -> start a file job for a model saved from the preview form
-router.post('/download', authenticate, requireUploader, async (req, res) => {
+router.post('/download', limiter, authenticate, requireUploader, async (req, res) => {
   try {
     const { model_id, url, file_ids } = req.body || {};
     const model = get('SELECT * FROM models WHERE id=?', [Number(model_id)]);
@@ -88,7 +91,7 @@ router.get('/jobs/:id', authenticate, (req, res) => {
 });
 
 // Retry downloads only what the model is still missing
-router.post('/jobs/:id/retry', authenticate, requireUploader, (req, res) => {
+router.post('/jobs/:id/retry', limiter, authenticate, requireUploader, (req, res) => {
   const job = ownedJob(req, res);
   if (!job) return;
   if (['pending', 'running'].includes(job.status)) return res.status(409).json({ error: 'Job is still running' });
