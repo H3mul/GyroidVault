@@ -306,6 +306,14 @@ const PREVIEW = { title: 'Bracket', description: 'Desc', url: 'https://www.print
     await App.refreshIngestBanner(3); await timers[0].fn(); await sleepTick();
     assert.strictEqual(nav, null);
   });
+  await check('Import banner: cover-only warning on a completed job is a quiet note (escaped), not a failure panel; warnings are listed on partial jobs', () => {
+    const quiet = UI.ingestBanner({ id: 1, model_id: 3, status: 'completed', detail: [{ name: 'cover image', status: 'warning', reason: "Blocked by the site's <b>bot protection</b>" }] });
+    assert.ok(quiet.includes('Imported.') && quiet.includes('cover image could not be downloaded') && quiet.includes('bot protection'));
+    assert.ok(!quiet.includes('Retry') && !quiet.includes('could not be imported') && !quiet.includes('<b>'));
+    assert.strictEqual(UI.ingestBanner({ id: 1, model_id: 3, status: 'completed', detail: [{ name: 'a.stl', status: 'ok' }] }), '');
+    const part = UI.ingestBanner({ id: 1, model_id: 3, status: 'partial', done: 1, total: 3, detail: [{ name: 'b.stl', status: 'failed', reason: 'HTTP 404' }, { name: 'cover image', status: 'warning', reason: 'blocked' }] });
+    assert.ok(part.includes('b.stl: HTTP 404') && part.includes('cover image: blocked') && part.includes('Retry import'));
+  });
   await check('Model detail page includes the source banner placeholder and loads it', async () => {
     // static guard: renderModelDetail must create #source-banner and call refreshSourceBanner
     const appSrc = fs.readFileSync(path.join(ROOT, 'public/js/app.js'), 'utf8');

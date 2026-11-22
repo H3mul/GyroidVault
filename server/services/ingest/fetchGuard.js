@@ -10,6 +10,10 @@ class IngestError extends Error {
 
 const MAX_REDIRECTS = 3;
 const codeForHttp = st => (st === 404 || st === 410 ? 'not_found' : st === 429 ? 'rate_limited' : st === 403 || st === 503 ? 'blocked' : 'http');
+/** A failed response as an IngestError; a Cloudflare challenge is named as bot protection, not a bare 403. */
+const httpError = (res, prefix) => (res.headers.get('cf-mitigated') === 'challenge'
+  ? new IngestError("Blocked by the site's bot protection (Cloudflare challenge); automated access is not allowed from this network", 422, 'blocked')
+  : new IngestError(`${prefix} HTTP ${res.status}`, 422, codeForHttp(res.status)));
 const TIMEOUT_MS = 15000;
 
 /** True only for globally routable unicast addresses. */
@@ -56,7 +60,8 @@ async function guardedFetch(url, opts = {}) {
       ...opts,
       redirect: 'manual',
       signal: AbortSignal.timeout(opts.timeoutMs || TIMEOUT_MS),
-      headers: { 'user-agent': UA, accept: '*/*', ...(opts.headers || {}) },
+      // Honest by default; an operator can override for their own instance (INGEST_USER_AGENT)
+      headers: { 'user-agent': process.env.INGEST_USER_AGENT || UA, accept: '*/*', ...(opts.headers || {}) },
     });
     if ([301, 302, 303, 307, 308].includes(res.status) && res.headers.get('location')) {
       await res.body?.cancel();
@@ -89,14 +94,14 @@ async function readCapped(res, maxBytes, onChunk) {
 /** GET a text page (HTML/JSON) with a size cap. */
 async function fetchText(url, opts = {}) {
   const res = await guardedFetch(url, opts);
-  if (!res.ok) { await res.body?.cancel(); throw new IngestError(`Site answered HTTP ${res.status}`, 422, codeForHttp(res.status)); }
+  if (!res.ok) { await res.body?.cancel(); throw httpError(res, 'Site answered'); }
   return (await readCapped(res, opts.maxBytes || 1.5 * 1024 * 1024)).toString('utf8');
 }
 
 /** Stream a file to disk with a size cap; deletes the partial file on failure. */
 async function downloadToFile(url, dest, maxBytes, headers) {
   const res = await guardedFetch(url, { timeoutMs: 10 * 60 * 1000, headers });
-  if (!res.ok) { await res.body?.cancel(); throw new IngestError(`Download failed with HTTP ${res.status}`, 422); }
+  if (!res.ok) { await res.body?.cancel(); throw httpError(res, 'Download failed with'); }
   const out = fs.createWriteStream(dest);
   try {
     await readCapped(res, maxBytes, chunk => out.write(chunk) ? undefined : new Promise(r => out.once('drain', r)));

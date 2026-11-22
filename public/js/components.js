@@ -1101,9 +1101,13 @@ const UI = {
 
   // ── URL import status banner (model detail) ──
   ingestBanner(job) {
-    if (!job || job.status === 'completed') return '';
+    if (!job) return '';
+    const warnings = (job.detail || []).filter(d => d.status === 'warning');
+    if (job.status === 'completed') { // imported fine; mention optional parts that could not be fetched (e.g. cover image)
+      return warnings.length ? `<div style="font-size:.75rem;color:var(--text-muted);margin-bottom:12px">Imported. ${warnings.map(d => `${UI.esc(d.name)} could not be downloaded: ${UI.esc(d.reason)}`).join('; ')}</div>` : '';
+    }
     const active = job.status === 'pending' || job.status === 'running';
-    const failed = (job.detail || []).filter(d => d.status === 'failed' || d.status === 'skipped');
+    const failed = (job.detail || []).filter(d => ['failed', 'skipped', 'warning'].includes(d.status));
     const upd = job.kind === 'update';
     const title = active ? `${upd ? 'Creating a new version from the source site…' : 'Importing files from the source site…'} ${job.done}/${job.total || '?'}`
       : job.status === 'partial' ? 'Some files could not be imported' : upd ? 'The update could not be completed' : 'Files could not be imported';

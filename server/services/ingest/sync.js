@@ -121,7 +121,7 @@ async function runUpdateJob(jobId, userId) {
         detail.push({ name, status: 'ok' });
       } catch (e) { detail.push({ name, status: 'failed', reason: e.message }); }
     }
-    if (p.coverUrl) { try { staged.push(await jobs.stageCover(p.coverUrl)); } catch (e) { detail.push({ name: 'cover image', status: 'failed', reason: e.message }); } }
+    if (p.coverUrl) { try { staged.push(await jobs.stageCover(p.coverUrl)); detail.push({ name: 'cover image', status: 'ok' }); } catch (e) { detail.push({ name: 'cover image', status: 'warning', reason: e.message }); } }
     if (!staged.some(s => !/^cover\./.test(s.originalname))) return fail(detail.find(d => d.status === 'failed')?.reason || 'No files could be fetched');
 
     // Something to put in the version: create it now

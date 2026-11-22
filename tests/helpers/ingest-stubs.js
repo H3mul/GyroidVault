@@ -20,7 +20,7 @@ const THING_HTML = `<html><head><title>x</title><meta property="og:title" conten
 
 // Mutable server state so tests can simulate upstream edits and outages.
 // mode: null | 'rate_limit' | 'not_found' | 'offline' (applies to Printables metadata queries, not file downloads)
-const state = { calls: [], mode: null, models: { 99: printable }, files: { 1: STL, 2: EXE } };
+const state = { calls: [], mode: null, coverFail: false, lastUA: null, models: { 99: printable }, files: { 1: STL, 2: EXE } };
 
 /** Registers a Printables model with files [{id,name,body}] and returns its fixture (mutate it to simulate edits). */
 function addModel(id, files, extra = {}) {
@@ -47,7 +47,7 @@ function syncFromFile() {
 
 global.fetch = async (url, opts = {}) => {
   syncFromFile();
-  url = String(url); state.calls.push(url);
+  url = String(url); state.calls.push(url); state.lastUA = opts.headers && opts.headers['user-agent'];
   if (url === 'https://api.printables.com/graphql/') {
     const q = JSON.parse(opts.body).query;
     if (q.includes('getDownloadLink')) {
@@ -61,7 +61,7 @@ global.fetch = async (url, opts = {}) => {
   }
   const fm = url.match(/^https:\/\/files\.printables\.com\/f\/(\d+)\.stl/);
   if (fm) return state.files[fm[1]] ? new Response(state.files[fm[1]]) : new Response('missing', { status: 404 });
-  if (url.startsWith('https://media.printables.com/')) return new Response(JPG);
+  if (url.startsWith('https://media.printables.com/')) return state.coverFail ? new Response('challenge', { status: 403, headers: { 'cf-mitigated': 'challenge' } }) : new Response(JPG);
   if (url === 'https://www.thingiverse.com/thing:5') return new Response(THING_HTML);
   if (url === 'https://api.thingiverse.com/things/5') {
     assert.strictEqual(opts.headers.authorization, 'Bearer tok');

@@ -250,6 +250,17 @@ const rejects = (p, status) => p.then(() => assert.fail('expected rejection'), e
     assert.ok(j.detail.some(d => d.name === 'h.stl' && d.status === 'failed'));
     assert.strictEqual(familyLatest(id80), j.result_model_id);
   });
+  await check('Update with a cover that cannot be fetched still completes (warning, not partial) and creates the version', async () => {
+    const m84 = addModel(84, [{ id: 81, name: 'a.stl', body: STL }]);
+    const id84 = await importModel(84);
+    m84.stls.push({ id: '82', name: 'b.stl', fileSize: STL.length }); state.files[82] = STL; bump(m84, '2026-06-01T00:00:00+00:00');
+    state.coverFail = true;
+    const j = await waitJob(S.startUpdateJob(id84, null, null));
+    state.coverFail = false;
+    assert.strictEqual(j.status, 'completed', JSON.stringify(j));
+    assert.deepStrictEqual(names(j.result_model_id), ['a.stl', 'b.stl']);
+    assert.strictEqual(j.detail.find(d => d.name === 'cover image').status, 'warning');
+  });
   await check('Selecting a subset of remote files limits what the new version contains', async () => {
     const m83 = addModel(83, [{ id: 51, name: 'p.stl', body: STL }, { id: 52, name: 'q.stl', body: STL2 }]);
     const id83 = await importModel(83);

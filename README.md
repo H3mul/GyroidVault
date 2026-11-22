@@ -160,6 +160,7 @@ In **New Model**, paste a model page URL and click **Import**. The title, descri
 
 - **Printables:** full import (metadata, tags, cover, files). No account needed.
 - **Thingiverse:** title, description and cover only, unless you set `THINGIVERSE_TOKEN` (a Thingiverse app token) to also import tags and files.
+- **Sites that block your network:** imports identify themselves honestly (`GyroidVault-Importer/1.0`). Some sites (Thingiverse in particular) serve a bot-protection challenge to that from certain networks; the model is still created, the cover shows as a note ("could not be downloaded") and file failures name the bot protection. `INGEST_USER_AGENT` replaces the User-Agent for your own instance; whether to present a different one to a site that is challenging automated clients is your decision and responsibility.
 - **Other sites:** pages that expose OpenGraph/JSON-LD metadata give title and description; sites that block automated access (e.g. Thangs, MakerWorld) cannot be imported and you fill the form in by hand.
 - **One click from the model page:** drag the *Send to GyroidVault* link from the New Model dialog to your bookmarks bar. It opens `#/import?url=<page>` on your instance.
 - **API:** `POST /api/ingest/preview {url}`, `POST /api/ingest {url, auto_rename?, allow_duplicate?, download_files?, file_ids?}` (creates the model and starts a download job), `GET /api/ingest/jobs/:id`, `POST /api/ingest/jobs/:id/retry`. Requires an uploader or admin account.

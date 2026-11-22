@@ -134,6 +134,47 @@ const waitJob = async (getJob, id) => { for (let i = 0; i < 100; i++) { const j 
     assert.ok(!state.calls.some(u => u.endsWith('/f/1.stl')), 'part.stl not re-downloaded');
   });
 
+  await check('Cover failure (bot-protection challenge) is a warning: model and files import, job completes, reason names the bot protection', async () => {
+    const { addModel } = require('./helpers/ingest-stubs');
+    addModel(55, [{ id: 71, name: 'k.stl', body: STL }]);
+    state.coverFail = true;
+    const r = await importFromUrl(null, { url: 'https://www.printables.com/model/55-x' });
+    const job = await waitJob(jobs.getJob, r.body.job_id);
+    state.coverFail = false;
+    assert.strictEqual(job.status, 'completed', JSON.stringify(job));
+    assert.strictEqual(job.error, null);
+    const cover = job.detail.find(d => d.name === 'cover image');
+    assert.strictEqual(cover.status, 'warning'); assert.match(cover.reason, /bot protection/i);
+    assert.deepStrictEqual(all('SELECT original_name FROM files WHERE model_id=?', [r.body.model.id]).map(f => f.original_name), ['k.stl']);
+    assert.strictEqual(job.done, 1);
+  });
+
+  await check('A failed file download is still reported as a failure, and a successful cover counts as done', async () => {
+    const { addModel } = require('./helpers/ingest-stubs');
+    addModel(56, [{ id: 72, name: 'ok.stl', body: STL }, { id: 73, name: 'gone.stl', body: STL }]);
+    delete state.files[73];
+    const r = await importFromUrl(null, { url: 'https://www.printables.com/model/56-x' });
+    const job = await waitJob(jobs.getJob, r.body.job_id);
+    assert.strictEqual(job.status, 'partial');
+    assert.ok(job.detail.some(d => d.name === 'gone.stl' && d.status === 'failed'));
+    assert.ok(job.detail.some(d => d.name === 'cover image' && d.status === 'ok'));
+    assert.strictEqual(job.done, 2); assert.strictEqual(job.total, 3);
+  });
+
+  await check('User-Agent is honest by default and overridable by the operator (INGEST_USER_AGENT)', async () => {
+    await preview('https://www.printables.com/model/99-test');
+    assert.match(state.lastUA, /^GyroidVault-Importer\//);
+    process.env.INGEST_USER_AGENT = 'Custom-UA/9';
+    await preview('https://www.printables.com/model/99-test');
+    delete process.env.INGEST_USER_AGENT;
+    assert.strictEqual(state.lastUA, 'Custom-UA/9');
+  });
+
+  await check('A Cloudflare challenge on a page fetch is reported as bot protection with code "blocked"', async () => {
+    global.fetch = (orig => async (u, o) => String(u) === 'https://challenged.example.com/' ? new Response('x', { status: 403, headers: { 'cf-mitigated': 'challenge' } }) : orig(u, o))(global.fetch);
+    await preview('https://challenged.example.com/').then(() => assert.fail('expected rejection'), e => { assert.strictEqual(e.code, 'blocked'); assert.match(e.message, /bot protection/i); });
+  });
+
   await check('Library sync keeps URL-imported models that have no files; stale jobs recover as failed', async () => {
     const metaOnly = (await importFromUrl(null, { url: 'https://www.thingiverse.com/thing:5', download_files: false })).body.model;
     run("INSERT INTO ingest_jobs (model_id, source_url, status) VALUES (?, 'https://x', 'running')", [metaOnly.id]);

@@ -96,7 +96,8 @@ async function runJob(jobId) {
     if (meta.coverUrl && !model.thumbnail) {
       try {
         addFilesToModel(model, [await stageCover(meta.coverUrl)]);
-      } catch (e) { detail.push({ name: 'cover image', status: 'failed', reason: e.message }); }
+        detail.push({ name: 'cover image', status: 'ok' });
+      } catch (e) { detail.push({ name: 'cover image', status: 'warning', reason: e.message }); } // the model is still usable without a cover
     }
 
     for (const { f, name } of todo) {
