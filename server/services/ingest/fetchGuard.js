@@ -1,6 +1,7 @@
 const dns = require('dns').promises;
 const net = require('net');
 const fs = require('fs');
+const flare = require('./flaresolverr');
 
 const UA = 'GyroidVault-Importer/1.0 (+https://github.com/TeeCodeDev/GyroidVault)';
 class IngestError extends Error {
@@ -61,13 +62,26 @@ async function guardedFetch(url, opts = {}) {
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     await assertPublicUrl(current);
-    const res = await fetch(current, {
+    const host = new URL(current).hostname.toLowerCase();
+    const useFs = flare.enabled() && flare.hostAllowed(host);
+    const send = clearance => fetch(current, {
       ...opts,
       redirect: 'manual',
       signal: AbortSignal.timeout(opts.timeoutMs || TIMEOUT_MS),
-      // Honest by default; an operator can override for their own instance (INGEST_USER_AGENT)
-      headers: { 'user-agent': process.env.INGEST_USER_AGENT || UA, accept: '*/*', ...(opts.headers || {}) },
+      // Honest by default; an operator can override for their own instance (INGEST_USER_AGENT).
+      // A FlareSolverr clearance is bound to the browser's User-Agent, so that one is sent with its cookie.
+      headers: {
+        'user-agent': (clearance && clearance.ua) || process.env.INGEST_USER_AGENT || UA, accept: '*/*',
+        ...(clearance ? { cookie: clearance.cookie } : {}), ...(opts.headers || {}),
+      },
     });
+    let res = await send(useFs ? flare.clearanceFor(host) : null);
+    if (useFs && res.headers.get('cf-mitigated') === 'challenge') { // opt-in: pass the challenge once, then repeat the request
+      await res.body?.cancel();
+      let clearance;
+      try { clearance = await flare.solve(current, host); } catch (e) { throw new IngestError(`Blocked by the site's bot protection and ${e.message}`, 422, 'blocked'); }
+      res = await send(clearance);
+    }
     if ([301, 302, 303, 307, 308].includes(res.status) && res.headers.get('location')) {
       await res.body?.cancel();
       const next = new URL(res.headers.get('location'), current);

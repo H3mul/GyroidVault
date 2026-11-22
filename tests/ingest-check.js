@@ -190,6 +190,76 @@ const waitJob = async (getJob, id) => { for (let i = 0; i < 100; i++) { const j 
     await preview('https://challenged.example.com/').then(() => assert.fail('expected rejection'), e => { assert.strictEqual(e.code, 'blocked'); assert.match(e.message, /bot protection/i); });
   });
 
+  // ── optional FlareSolverr (Cloudflare challenge solving) ──
+  const fsMod = require('../server/services/ingest/flaresolverr');
+  const fsReset = () => { fsMod._cache.clear(); state.fsCalls = []; state.protectedSeen = []; state.fsMode = 'ok'; state.fsExpires = 3600; delete process.env.FLARESOLVERR_URL; delete process.env.FLARESOLVERR_HOSTS; };
+  const dl = async u => { const f = path.join(tmp, `dl-${Date.now()}-${Math.random()}.bin`); try { return { size: await guard.downloadToFile(u, f, 1 << 20), file: f }; } finally { /* keep for size check */ } };
+
+  await check('FlareSolverr off by default: a challenged CDN download fails as bot protection and FlareSolverr is never called', async () => {
+    fsReset();
+    await dl('https://cdn.thingiverse.com/img.jpg').then(() => assert.fail('expected rejection'), e => { assert.strictEqual(e.code, 'blocked'); assert.match(e.message, /bot protection/i); });
+    assert.strictEqual(state.fsCalls.length, 0);
+  });
+
+  await check('FlareSolverr on: challenge is solved once, the request is repeated with the clearance cookie and its User-Agent, and the clearance is cached per host', async () => {
+    fsReset(); process.env.FLARESOLVERR_URL = 'http://flaresolverr.test:8191/';
+    const r = await dl('https://cdn.thingiverse.com/img.jpg');
+    assert.strictEqual(r.size, 8);
+    assert.strictEqual(state.fsCalls.length, 1);
+    assert.deepStrictEqual([state.fsCalls[0].cmd, state.fsCalls[0].url], ['request.get', 'https://cdn.thingiverse.com/img.jpg']);
+    const last = state.protectedSeen[state.protectedSeen.length - 1];
+    assert.strictEqual(last.ua, 'Solved-UA/1'); assert.match(last.cookie, /cf_clearance=ok/);
+    assert.ok(!/leak=/.test(last.cookie), 'cookies FlareSolverr holds for unrelated domains are never forwarded');
+    state.protectedSeen = [];
+    await dl('https://cdn.thingiverse.com/other.jpg');
+    assert.strictEqual(state.fsCalls.length, 1, 'cached clearance reused, no second solve');
+    assert.strictEqual(state.protectedSeen.length, 1, 'and sent proactively (no challenged first attempt)');
+    fsReset();
+  });
+
+  await check('FlareSolverr only for allowlisted hosts: a challenged unknown host is not forwarded to the browser; FLARESOLVERR_HOSTS widens the list', async () => {
+    fsReset(); process.env.FLARESOLVERR_URL = 'http://flaresolverr.test:8191';
+    await dl('https://evil.example.com/x.jpg').then(() => assert.fail('expected rejection'), e => assert.strictEqual(e.code, 'blocked'));
+    assert.strictEqual(state.fsCalls.length, 0, 'never asked FlareSolverr to visit an arbitrary host');
+    process.env.FLARESOLVERR_HOSTS = 'example.com';
+    // allowlisted now; the stub's clearance cookie is for the host's registrable domain
+    state.fsMode = 'ok';
+    const r = await dl('https://cdn2.example.com/x.jpg'); assert.strictEqual(r.size, 8);
+    assert.strictEqual(state.fsCalls.length, 1);
+    await dl('https://cdn.thingiverse.com/img.jpg').then(() => assert.fail('expected rejection'), e => assert.strictEqual(e.code, 'blocked'));
+    assert.strictEqual(state.fsCalls.length, 1, 'thingiverse is no longer allowlisted');
+    fsReset();
+  });
+
+  await check('FlareSolverr failures are explained and never loop: unreachable, cannot solve, no clearance cookie', async () => {
+    for (const [mode, re] of [['down', /FlareSolverr is not reachable/], ['error', /could not solve/], ['no-clearance', /did not obtain a Cloudflare clearance/]]) {
+      fsReset(); process.env.FLARESOLVERR_URL = 'http://flaresolverr.test:8191'; state.fsMode = mode;
+      await dl('https://cdn.thingiverse.com/img.jpg').then(() => assert.fail('expected rejection'), e => { assert.strictEqual(e.code, 'blocked'); assert.match(e.message, re); });
+      assert.strictEqual(state.fsCalls.length, 1, `${mode}: exactly one attempt`);
+    }
+    fsReset();
+  });
+
+  await check('A short-lived clearance is not cached (expiry margin), so the next request solves again', async () => {
+    fsReset(); process.env.FLARESOLVERR_URL = 'http://flaresolverr.test:8191'; state.fsExpires = 30;
+    await dl('https://cdn.thingiverse.com/img.jpg'); await dl('https://cdn.thingiverse.com/img.jpg');
+    assert.strictEqual(state.fsCalls.length, 2);
+    fsReset();
+  });
+
+  await check('Thingiverse cover behind Cloudflare: warning without FlareSolverr, imported with it', async () => {
+    fsReset(); process.env.THINGIVERSE_TOKEN = 'tok';
+    const j1 = await (async () => { const r = await importFromUrl(null, { url: 'https://www.thingiverse.com/thing:6', auto_rename: true }); return { r, job: await waitJob(jobs.getJob, r.body.job_id) }; })();
+    assert.strictEqual(j1.job.status, 'completed'); assert.strictEqual(j1.job.detail.find(d => d.name === 'cover image').status, 'warning');
+    assert.ok(!get('SELECT thumbnail t FROM models WHERE id=?', [j1.r.body.model.id]).t);
+    process.env.FLARESOLVERR_URL = 'http://flaresolverr.test:8191';
+    const r2 = await importFromUrl(null, { url: 'https://www.thingiverse.com/thing:6', allow_duplicate: true, auto_rename: true });
+    const job2 = await waitJob(jobs.getJob, r2.body.job_id);
+    assert.strictEqual(job2.detail.find(d => d.name === 'cover image').status, 'ok');
+    assert.ok(get('SELECT thumbnail t FROM models WHERE id=?', [r2.body.model.id]).t, 'cover became the thumbnail');
+    delete process.env.THINGIVERSE_TOKEN; fsReset();
+  });
+
   await check('Library sync keeps URL-imported models that have no files; stale jobs recover as failed', async () => {
     const metaOnly = (await importFromUrl(null, { url: 'https://www.printables.com/model/99-test', allow_duplicate: true, auto_rename: true, download_files: false })).body.model;
     run("INSERT INTO ingest_jobs (model_id, source_url, status) VALUES (?, 'https://x', 'running')", [metaOnly.id]);

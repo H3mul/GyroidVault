@@ -20,7 +20,7 @@ const THING_HTML = `<html><head><title>x</title><meta property="og:title" conten
 
 // Mutable server state so tests can simulate upstream edits and outages.
 // mode: null | 'rate_limit' | 'not_found' | 'offline' (applies to Printables metadata queries, not file downloads)
-const state = { dnsLookups: 0, calls: [], mode: null, coverFail: false, tvChallenge: false, lastUA: null, models: { 99: printable }, files: { 1: STL, 2: EXE } };
+const state = { fsCalls: [], fsMode: 'ok', fsExpires: 3600, protectedSeen: [], dnsLookups: 0, calls: [], mode: null, coverFail: false, tvChallenge: false, lastUA: null, models: { 99: printable }, files: { 1: STL, 2: EXE } };
 
 /** Registers a Printables model with files [{id,name,body}] and returns its fixture (mutate it to simulate edits). */
 function addModel(id, files, extra = {}) {
@@ -62,6 +62,26 @@ global.fetch = async (url, opts = {}) => {
   const fm = url.match(/^https:\/\/files\.printables\.com\/f\/(\d+)\.stl/);
   if (fm) return state.files[fm[1]] ? new Response(state.files[fm[1]]) : new Response('missing', { status: 404 });
   if (url.startsWith('https://media.printables.com/')) return state.coverFail ? new Response('challenge', { status: 403, headers: { 'cf-mitigated': 'challenge' } }) : new Response(JPG);
+  // FlareSolverr + a Cloudflare-protected host: challenged unless the request carries the solved cookie and User-Agent
+  if (url === 'http://flaresolverr.test:8191/v1') {
+    state.fsCalls.push(JSON.parse(opts.body));
+    if (state.fsMode === 'down') throw new TypeError('connect ECONNREFUSED');
+    if (state.fsMode === 'error') return json({ status: 'error', message: 'Challenge not detected!' });
+    const target = new URL(JSON.parse(opts.body).url);
+    const cookies = state.fsMode === 'no-clearance' ? [{ name: 'other', value: '1', domain: target.hostname }]
+      : [{ name: 'cf_clearance', value: 'ok', domain: '.' + target.hostname.split('.').slice(-2).join('.'), expires: Date.now() / 1000 + state.fsExpires },
+        { name: 'leak', value: 'x', domain: '.unrelated-tracker.test', expires: Date.now() / 1000 + 3600 }]; // the browser may hold cookies for other domains
+    return json({ status: 'ok', solution: { url: target.href, status: 200, cookies, userAgent: 'Solved-UA/1' } });
+  }
+  const cf = new URL(url).hostname;
+  if (cf === 'cdn.thingiverse.com' || cf === 'evil.example.com' || cf === 'cdn2.example.com') {
+    const h = opts.headers || {};
+    state.protectedSeen.push({ url, ua: h['user-agent'], cookie: h.cookie });
+    return h.cookie && h.cookie.includes('cf_clearance=ok') && h['user-agent'] === 'Solved-UA/1'
+      ? new Response(JPG) : new Response('challenge', { status: 403, headers: { 'cf-mitigated': 'challenge' } });
+  }
+  if (url === 'https://api.thingiverse.com/things/6') return json({ name: 'Cover on CDN', description: 'd', tags: [], default_image: { url: 'https://cdn.thingiverse.com/img.jpg' } });
+  if (url === 'https://api.thingiverse.com/things/6/files') return json([]);
   if (url === 'https://www.thingiverse.com/thing:5') return new Response(THING_HTML);
   if (url.startsWith('https://api.thingiverse.com/') && opts.headers.authorization !== 'Bearer tok') {
     return state.tvChallenge ? new Response('x', { status: 403, headers: { 'cf-mitigated': 'challenge' } }) : json({ error: 'Unauthorized access', type: 'INVALID_TOKEN' }, 401);
