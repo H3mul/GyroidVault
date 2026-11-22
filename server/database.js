@@ -213,6 +213,23 @@ async function initDatabase() {
   `);
 
   db.run(`
+    CREATE TABLE IF NOT EXISTS ingest_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      model_id INTEGER NOT NULL,
+      source_url TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending', -- pending|running|completed|partial|failed
+      selected TEXT,                           -- JSON array of provider file ids, null = all
+      total INTEGER DEFAULT 0,
+      done INTEGER DEFAULT 0,
+      detail TEXT DEFAULT '[]',                -- JSON array of {name,status,reason}
+      error TEXT,
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now')),
+      FOREIGN KEY (model_id) REFERENCES models(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS print_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       model_id INTEGER NOT NULL,

@@ -61,6 +61,7 @@ async function syncLibraryWithDisk() {
       SELECT m.id, m.name FROM models m 
       LEFT JOIN files f ON f.model_id = m.id 
       WHERE f.id IS NULL AND m.library_path IS NOT NULL
+        AND m.id NOT IN (SELECT model_id FROM ingest_jobs) -- URL-imported models may legitimately have no files yet
     `);
     for (const model of emptyModels) {
       const msg = `Model directory empty/missing, removing model: ${model.name}`;
