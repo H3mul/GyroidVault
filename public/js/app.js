@@ -702,7 +702,7 @@ const App = {
   // ─── Models List ──────────────────────────────────────────────────────
   async renderModels(params = {}) {
     // check if we should show folder view instead (only when no search/category/tag/format filter is active)
-    const hasActiveFilter = !!(params.search || params.category || params.tag || (params.format && params.format !== 'all') || params.user || params.printed || params.project_id);
+    const hasActiveFilter = !!(params.search || params.category || params.tag || (params.format && params.format !== 'all') || params.user || params.printed || params.updates || params.project_id);
     if (this.libraryViewMode === 'folder' && !hasActiveFilter) {
       return this.renderBrowse(params.path || '');
     }
@@ -730,6 +730,7 @@ const App = {
     if (params.tag) document.getElementById('filter-tag').value = params.tag;
     if (params.user) document.getElementById('filter-user').value = params.user;
     if (params.printed) document.getElementById('filter-printed').value = params.printed;
+    if (params.updates) document.getElementById('filter-updates').value = params.updates;
     if (params.sort) document.getElementById('filter-sort').value = params.sort;
     if (params.limit) {
       const limitSelect = document.getElementById('filter-limit');
@@ -1329,6 +1330,7 @@ const App = {
     const tag = document.getElementById('filter-tag')?.value;
     const user = document.getElementById('filter-user')?.value;
     const printed = document.getElementById('filter-printed')?.value;
+    const updates = document.getElementById('filter-updates')?.value;
     const sort = document.getElementById('filter-sort')?.value;
     const limit = document.getElementById('filter-limit')?.value;
 
@@ -1344,11 +1346,12 @@ const App = {
     if (this.currentFormatFilter && this.currentFormatFilter !== 'all') params.set('format', this.currentFormatFilter);
     if (user) params.set('user', user);
     if (printed) params.set('printed', printed);
+    if (updates) params.set('updates', updates);
     if (sort && sort !== 'updated') params.set('sort', sort);
     if (limit && limit !== '24') params.set('limit', limit);
     params.set('page', '1');
 
-    const hasActiveFilter = !!(search || category || tag || (this.currentFormatFilter && this.currentFormatFilter !== 'all') || user || printed);
+    const hasActiveFilter = !!(search || category || tag || (this.currentFormatFilter && this.currentFormatFilter !== 'all') || user || printed || updates);
     if (this.libraryViewMode === 'folder' && !hasActiveFilter) {
       this.renderBrowse(this.currentBrowsePath);
     } else {
@@ -2400,8 +2403,9 @@ const App = {
       const hasPrinters = printers.length > 0;
 
       this.el.innerHTML = `
-        <div id="ingest-banner"></div>${UI.modelDetail(model, hasPrinters)}`;
+        <div id="ingest-banner"></div><div id="source-banner"></div>${UI.modelDetail(model, hasPrinters)}`;
       this.refreshIngestBanner(model.id);
+      this.refreshSourceBanner(model.id);
       // Initialize 3D viewer using chosen 3D preview file or first stl/3mf
       const files = model.files || [];
       const cadFiles = files.filter(f => f.file_type === 'stl' || f.file_type === '3mf' || f.file_type === 'step');
@@ -3124,9 +3128,68 @@ const App = {
     let job;
     try { job = await API.ingestJobForModel(modelId); } catch (e) { return; }
     const active = !!job && ['pending', 'running'].includes(job.status);
-    if (wasActive && !active) return this.renderModelDetail(modelId); // files have arrived
+    if (wasActive && !active) {
+      // finished update: open the version it created; finished import: show the new files
+      if (job && job.kind === 'update' && job.result_model_id && ['completed', 'partial'].includes(job.status)) return this.navigate(`/models/${job.result_model_id}`);
+      return this.renderModelDetail(modelId);
+    }
     el.innerHTML = UI.ingestBanner(job);
     if (active) setTimeout(() => this.refreshIngestBanner(modelId, true), 2000);
+  },
+
+  // ── Source update tracking ──
+  async refreshSourceBanner(modelId) {
+    const el = document.getElementById('source-banner');
+    if (!el) return;
+    try { el.innerHTML = UI.sourceBanner(await API.sourceInfo(modelId), modelId); } catch (e) { el.innerHTML = ''; }
+  },
+
+  async checkSourceNow(modelId) {
+    try {
+      const r = await API.sourceCheck(modelId);
+      this.toast(r.ok ? (r.state === 'current' ? 'Up to date' : 'Source has changes') : `Could not check the source: ${r.error}`, r.ok ? undefined : 'error');
+    } catch (e) { this.toast(e.message, 'error'); }
+    this.refreshSourceBanner(modelId);
+  },
+
+  async trackSource(modelId) {
+    try { await API.sourceTrack(modelId); this.toast('Tracking source for updates'); } catch (e) { this.toast(e.message, 'error'); }
+    this.refreshSourceBanner(modelId);
+  },
+
+  async dismissSource(modelId) {
+    try { await API.sourceDismiss(modelId); } catch (e) { this.toast(e.message, 'error'); }
+    this.refreshSourceBanner(modelId);
+  },
+
+  async refreshSourceMeta(modelId) {
+    try {
+      const r = await API.sourceRefreshMetadata(modelId);
+      this.toast(r.kept && r.kept.length ? `Metadata refreshed (kept your edits to ${r.kept.join(', ')})` : 'Metadata refreshed');
+      this.renderModelDetail(modelId);
+    } catch (e) { this.toast(e.message, 'error'); }
+  },
+
+  async openSourceUpdate(modelId) {
+    try {
+      const pv = await API.sourceUpdatePreview(modelId);
+      this.openModal('Update from source', UI.sourceUpdateDialog(pv, modelId));
+    } catch (e) { this.toast(`Could not read the source: ${e.message}`, 'error'); }
+  },
+
+  async runSourceUpdate(modelId) {
+    const ids = Array.from(document.querySelectorAll('input[name="update_files"]:checked')).map(c => c.value);
+    if (!ids.length) return this.toast('Select at least one file', 'error');
+    try {
+      await API.sourceUpdate(modelId, ids);
+      this.closeModal();
+      this.toast('Update started: a new version is being built');
+      this.refreshIngestBanner(modelId);
+    } catch (e) { this.toast(e.message, 'error'); }
+  },
+
+  async checkAllSources() {
+    try { await API.checkAllSources(); this.toast('Checking tracked models in the background'); } catch (e) { this.toast(e.message, 'error'); }
   },
 
   async retryIngest(jobId, modelId) {

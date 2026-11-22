@@ -116,6 +116,14 @@ const API = {
   ingestPreview(url) { return this.request('/api/ingest/preview', { method: 'POST', body: JSON.stringify({ url }) }); },
   ingestDownload(model_id, url, file_ids) { return this.request('/api/ingest/download', { method: 'POST', body: JSON.stringify({ model_id, url, file_ids }) }); },
   ingestJobForModel(modelId) { return this.request(`/api/ingest/models/${modelId}/job`); },
+  sourceInfo(id) { return this.request(`/api/ingest/models/${id}/source`); },
+  sourceCheck(id) { return this.request(`/api/ingest/models/${id}/check`, { method: 'POST', body: '{}' }); },
+  sourceTrack(id) { return this.request(`/api/ingest/models/${id}/track`, { method: 'POST', body: '{}' }); },
+  sourceDismiss(id) { return this.request(`/api/ingest/models/${id}/dismiss`, { method: 'POST', body: '{}' }); },
+  sourceUpdatePreview(id) { return this.request(`/api/ingest/models/${id}/update-preview`, { method: 'POST', body: '{}' }); },
+  sourceUpdate(id, file_ids) { return this.request(`/api/ingest/models/${id}/update`, { method: 'POST', body: JSON.stringify({ file_ids }) }); },
+  sourceRefreshMetadata(id) { return this.request(`/api/ingest/models/${id}/refresh-metadata`, { method: 'POST', body: '{}' }); },
+  checkAllSources() { return this.request('/api/ingest/check-all', { method: 'POST', body: '{}' }); },
   ingestRetry(jobId) { return this.request(`/api/ingest/jobs/${jobId}/retry`, { method: 'POST' }); },
   updateModel(id, data) {
     return this.request(`/api/models/${id}`, { method: 'PUT', body: JSON.stringify(data) });

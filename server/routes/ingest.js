@@ -101,8 +101,13 @@ router.post('/jobs/:id/retry', limiter, authenticate, requireUploader, (req, res
   const job = ownedJob(req, res);
   if (!job) return;
   if (['pending', 'running'].includes(job.status)) return res.status(409).json({ error: 'Job is still running' });
-  const target = job.kind === 'update' && job.result_model_id ? job.result_model_id : job.model_id;
-  res.status(202).json({ job_id: startJob(target, job.source_url, job.selected ? JSON.parse(job.selected) : null) });
+  const selected = job.selected ? JSON.parse(job.selected) : null;
+  if (job.kind === 'update' && !job.result_model_id) { // nothing was created: run the update again
+    try { return res.status(202).json({ job_id: sync.startUpdateJob(job.model_id, selected, req.user.id) }); } catch (e) { return fail(res, e); }
+  }
+  // import jobs, and partial updates (fill in the missing files of the version they created)
+  const target = job.kind === 'update' ? job.result_model_id : job.model_id;
+  res.status(202).json({ job_id: startJob(target, job.source_url, selected) });
 });
 
 // ─── Source update tracking ──────────────────────────────────────────────────

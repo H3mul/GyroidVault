@@ -235,6 +235,15 @@ async function waitJob(session, id) {
     const job = await waitJob(owner, up.data.job_id);
     assert.strictEqual(job.status, 'failed'); assert.ok(job.error);
     assert.strictEqual((await req(`/api/models/${track.rootId}`, { session: owner })).data.latest_version.id, track.v2);
+    // retrying a failed update runs the update again (kind update), it must not import files into the old version
+    setStub({ models: { 200: mdl(200, [[1001, 'a.stl'], [1002, 'b.stl'], [1003, 'c.stl'], [1004, 'd.stl']], { modified: '2026-03-01T00:00:00+00:00' }) }, files: { 1004: 'STL' } });
+    const filesBefore = (await req(`/api/models/${track.v2}`, { session: owner })).data.files.length;
+    const rt = await post(`/api/ingest/jobs/${job.id}/retry`, {});
+    assert.strictEqual(rt.status, 202);
+    const again = await waitJob(owner, rt.data.job_id);
+    assert.strictEqual(again.kind, 'update'); assert.strictEqual(again.status, 'completed', JSON.stringify(again));
+    assert.strictEqual((await req(`/api/models/${track.v2}`, { session: owner })).data.files.length, filesBefore, 'old version untouched by the retry');
+    assert.notStrictEqual((await req(`/api/models/${track.rootId}`, { session: owner })).data.latest_version.id, track.v2, 'a new version now exists');
   });
   await check('Dismiss clears the library flag; refresh-metadata returns state; check-all is admin-only', async () => {
     setStub({ models: { 201: mdl(201, [[2001, 'x.stl']]) }, files: { 2001: 'STL' } });

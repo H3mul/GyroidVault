@@ -40,6 +40,7 @@ const code = ['api', 'components', 'app'].map(f => fs.readFileSync(path.join(ROO
 vm.createContext(sandbox);
 vm.runInContext(`${code}\nthis.__API = API; this.__UI = UI; this.__App = App;`, sandbox);
 const { __API: API, __UI: UI, __App: App } = sandbox;
+const realRefreshIngest = App.refreshIngestBanner;
 App.currentUser = { id: 1, username: 'u', role: 'admin' };
 App.toast = (m, t) => App.__toasts.push([m, t]); App.__toasts = [];
 
@@ -181,6 +182,134 @@ const PREVIEW = { title: 'Bracket', description: 'Desc', url: 'https://www.print
     App.route(); await sleepTick();
     assert.deepStrictEqual(nav, ['/models']);
     assert.strictEqual(imported, 'https://www.printables.com/model/9-z?x=1&y=2');
+  });
+
+  // ── source update tracking UI ──
+  const info = (o = {}) => ({ tracked: true, supported: true, site: 'printables', source_url: 'https://www.printables.com/model/1', state: 'current', dismissed: false, summary: null, last_checked_at: '2026-11-22 03:00:00', last_error: null, estimate: false, ...o });
+
+  await check('API.source* methods call the right endpoints', async () => {
+    const calls = []; API.request = (u, o) => (calls.push([u, o?.method || 'GET', o?.body]), Promise.resolve({}));
+    await API.sourceInfo(4); await API.sourceCheck(4); await API.sourceTrack(4); await API.sourceDismiss(4); await API.sourceUpdatePreview(4); await API.sourceUpdate(4, ['stl:1']); await API.sourceRefreshMetadata(4); await API.checkAllSources();
+    assert.strictEqual(JSON.stringify(calls.map(c => [c[0], c[1]])), JSON.stringify([
+      ['/api/ingest/models/4/source', 'GET'], ['/api/ingest/models/4/check', 'POST'], ['/api/ingest/models/4/track', 'POST'], ['/api/ingest/models/4/dismiss', 'POST'],
+      ['/api/ingest/models/4/update-preview', 'POST'], ['/api/ingest/models/4/update', 'POST'], ['/api/ingest/models/4/refresh-metadata', 'POST'], ['/api/ingest/check-all', 'POST']]));
+    assert.deepStrictEqual(JSON.parse(calls[5][2]), { file_ids: ['stl:1'] });
+  });
+
+  await check('Source banner: nothing for unsupported sources; Track button when untracked; quiet line when current', () => {
+    assert.strictEqual(UI.sourceBanner(null, 1), '');
+    assert.strictEqual(UI.sourceBanner({ tracked: false, supported: false }, 1), '');
+    assert.ok(UI.sourceBanner({ tracked: false, supported: true, site: 'printables' }, 7).includes('App.trackSource(7)'));
+    const cur = UI.sourceBanner(info(), 7);
+    assert.ok(cur.includes('Tracking printables') && cur.includes('App.checkSourceNow(7)') && !cur.includes('Update from source'));
+  });
+  await check('Source banner: outdated shows counts and actions; dismissed returns to the quiet line; unknown_changed explains the estimate', () => {
+    const out = UI.sourceBanner(info({ state: 'outdated', summary: { added: [{}, {}], changed: [{}], removed: [] } }), 7);
+    assert.ok(out.includes('Update available on printables') && out.includes('2 new, 1 changed, 0 removed'));
+    for (const fn of ['openSourceUpdate', 'dismissSource', 'checkSourceNow']) assert.ok(out.includes(`App.${fn}(7)`), fn);
+    assert.ok(!UI.sourceBanner(info({ state: 'outdated', dismissed: true, summary: {} }), 7).includes('Update available'));
+    const unk = UI.sourceBanner(info({ state: 'unknown_changed', estimate: true, summary: {} }), 7);
+    assert.ok(unk.includes('Possibly updated') && unk.includes('an estimate'));
+  });
+  await check('Source banner: metadata_changed offers refresh; unavailable source is reassuring; last error is shown', () => {
+    assert.ok(UI.sourceBanner(info({ state: 'metadata_changed' }), 7).includes('App.refreshSourceMeta(7)'));
+    const gone = UI.sourceBanner(info({ state: 'source_unavailable' }), 7);
+    assert.ok(gone.includes('no longer available') && gone.includes('Your files are untouched'));
+    assert.ok(UI.sourceBanner(info({ last_error: 'Printables answered HTTP 429' }), 7).includes('HTTP 429'));
+  });
+  await check('Source banner escapes every untrusted value and neutralises non-http source links', () => {
+    const html = UI.sourceBanner(info({ site: '<img src=x onerror=1>', last_error: '<script>x</script>', source_url: 'javascript:alert(1)', last_checked_at: '"><b>' }), 7);
+    assert.ok(!html.includes('<img') && !html.includes('<script>') && !html.includes('javascript:alert') && !html.includes('"><b>'), html);
+  });
+  await check('Update dialog: per-file checkboxes with status, removed files, metadata note; no submit when files unavailable; escaped', () => {
+    const pv = { files: [{ id: 'stl:1', name: 'a<i>.stl', size: 2048, status: 'new' }, { id: 'stl:2', name: 'b.stl', size: 3 * 1048576, status: 'unchanged' }], removed: [{ name: 'old<b>.stl' }], metaDiff: { title: true, description: false, tags: true }, estimate: true };
+    const html = UI.sourceUpdateDialog(pv, 9);
+    assert.ok(html.includes('value="stl:1" checked') && html.includes('value="stl:2" checked') && html.includes('>new<') && html.includes('>unchanged<'));
+    assert.ok(html.includes('3.0 MB') && html.includes('title, tags') && html.includes('estimate') && html.includes('App.runSourceUpdate(9)'));
+    assert.ok(!html.includes('<i>') && !html.includes('old<b>'), 'names escaped');
+    const tok = UI.sourceUpdateDialog({ files: [], filesNeedToken: true, removed: [], metaDiff: {} }, 9);
+    assert.ok(tok.includes('THINGIVERSE_TOKEN') && !tok.includes('runSourceUpdate'));
+  });
+  await check('Library: card shows an Update badge only when update_state is set; toolbar has the Updates filter', () => {
+    assert.ok(UI.modelCard({ id: 1, name: 'x', update_state: 'outdated' }).includes('>Update<'));
+    assert.ok(!UI.modelCard({ id: 1, name: 'x', update_state: null }).includes('>Update<'));
+    assert.ok(UI.toolbar([], [], [], 'all').includes('id="filter-updates"'));
+  });
+  await check('Settings form has the check interval (default 24) and a check-all button', () => {
+    const f = UI.systemSettingsForm({});
+    assert.ok(f.includes('name="source_check_interval_hours" value="24"') && f.includes('App.checkAllSources()'));
+    assert.ok(UI.systemSettingsForm({ source_check_interval_hours: '0' }).includes('name="source_check_interval_hours" value="0"'));
+  });
+  await check('Library filter: "Updates available" is sent as updates=1 and counts as an active filter even in folder view', () => {
+    const vals = { 'filter-updates': '1' };
+    const real = sandbox.document.getElementById;
+    sandbox.document.getElementById = id => (id in vals ? { value: vals[id] } : { value: '' });
+    App.libraryViewMode = 'folder'; let hash = null, browsed = false;
+    Object.defineProperty(sandbox.window.location, 'hash', { set: v => { hash = v; }, get: () => '', configurable: true });
+    App.renderBrowse = () => { browsed = true; };
+    App.handleFilter();
+    sandbox.document.getElementById = real; App.libraryViewMode = 'grid';
+    assert.ok(hash && hash.includes('updates=1'), `hash=${hash}`); assert.strictEqual(browsed, false);
+  });
+
+  const lastToast = () => App.__toasts[App.__toasts.length - 1];
+  await check('Banner actions: Check now toasts the result or the failure and refreshes; Track and Dismiss refresh; errors toast', async () => {
+    mk('source-banner'); App.__toasts = []; let refreshed = 0;
+    API.sourceInfo = async () => { refreshed++; return info(); };
+    API.sourceCheck = async () => ({ ok: true, state: 'outdated' }); await App.checkSourceNow(5);
+    assert.strictEqual(lastToast()[0], 'Source has changes');
+    API.sourceCheck = async () => ({ ok: true, state: 'current' }); await App.checkSourceNow(5); assert.strictEqual(lastToast()[0], 'Up to date');
+    API.sourceCheck = async () => ({ ok: false, error: 'Printables answered HTTP 429' }); await App.checkSourceNow(5);
+    assert.deepStrictEqual([lastToast()[1], lastToast()[0].includes('HTTP 429')], ['error', true]);
+    API.sourceTrack = async () => ({}); API.sourceDismiss = async () => ({}); await App.trackSource(5); await App.dismissSource(5);
+    assert.strictEqual(refreshed, 5);
+    API.sourceDismiss = async () => { throw new Error('Forbidden'); }; await App.dismissSource(5); assert.strictEqual(lastToast()[0], 'Forbidden');
+    assert.ok(els['source-banner'].innerHTML.includes('Tracking printables'));
+  });
+  await check('Refresh metadata reports kept edits and re-renders the page', async () => {
+    let rendered = null; App.renderModelDetail = async id => { rendered = id; }; App.__toasts = [];
+    API.sourceRefreshMetadata = async () => ({ state: 'current', kept: ['description'] }); await App.refreshSourceMeta(5);
+    assert.ok(lastToast()[0].includes('kept your edits to description')); assert.strictEqual(rendered, 5);
+  });
+  await check('Update dialog flow: opens with the preview; submitting sends only ticked files, closes, and starts job tracking; empty selection is refused', async () => {
+    let modal = null, closed = false, tracked = null, sent = null; App.__toasts = [];
+    App.openModal = (t, h) => { modal = [t, h]; }; App.closeModal = () => { closed = true; };
+    API.sourceUpdatePreview = async () => ({ files: [{ id: 'stl:1', name: 'a.stl', size: 1, status: 'new' }], removed: [], metaDiff: {} });
+    await App.openSourceUpdate(5);
+    assert.strictEqual(modal[0], 'Update from source'); assert.ok(modal[1].includes('value="stl:1"'));
+    const realQ = sandbox.document.querySelectorAll;
+    sandbox.document.querySelectorAll = () => [];
+    await App.runSourceUpdate(5); assert.strictEqual(lastToast()[0], 'Select at least one file'); assert.strictEqual(sent, null);
+    sandbox.document.querySelectorAll = sel => (sel.includes('update_files') ? [{ value: 'stl:1' }, { value: 'stl:3' }] : []);
+    API.sourceUpdate = async (id, ids) => { sent = [id, ids]; return { job_id: 1 }; };
+    App.refreshIngestBanner = id => { tracked = id; };
+    await App.runSourceUpdate(5);
+    sandbox.document.querySelectorAll = realQ;
+    assert.strictEqual(JSON.stringify(sent), JSON.stringify([5, ['stl:1', 'stl:3']])); assert.ok(closed); assert.strictEqual(tracked, 5);
+    API.sourceUpdatePreview = async () => { throw new Error('Site answered HTTP 403'); }; App.__toasts = [];
+    await App.openSourceUpdate(5); assert.ok(lastToast()[0].includes('HTTP 403'));
+  });
+  await check('Import banner for update jobs: wording, retry label, and navigation to the created version when the job finishes', async () => {
+    App.refreshIngestBanner = realRefreshIngest; // an earlier test stubs it
+    const run = UI.ingestBanner({ id: 1, model_id: 3, kind: 'update', status: 'running', done: 1, total: 3, detail: [] });
+    assert.ok(run.includes('Creating a new version'));
+    const bad = UI.ingestBanner({ id: 1, model_id: 3, kind: 'update', status: 'failed', error: 'x', detail: [] });
+    assert.ok(bad.includes('The update could not be completed') && bad.includes('Retry update'));
+    mk('ingest-banner'); timers = [];
+    const seq = [{ id: 1, model_id: 3, kind: 'update', status: 'running', done: 0, total: 2, detail: [] }, { id: 1, model_id: 3, kind: 'update', status: 'completed', result_model_id: 44, done: 2, total: 2, detail: [] }];
+    let i = 0, nav = null, rerender = false; API.ingestJobForModel = async () => seq[Math.min(i++, 1)];
+    App.navigate = p => { nav = p; }; App.renderModelDetail = async () => { rerender = true; };
+    await App.refreshIngestBanner(3); await timers[0].fn(); await sleepTick();
+    assert.strictEqual(nav, '/models/44'); assert.strictEqual(rerender, false);
+    // a failed update does not navigate anywhere
+    i = 0; nav = null; seq[1] = { id: 1, model_id: 3, kind: 'update', status: 'failed', result_model_id: null, detail: [] }; timers = [];
+    await App.refreshIngestBanner(3); await timers[0].fn(); await sleepTick();
+    assert.strictEqual(nav, null);
+  });
+  await check('Model detail page includes the source banner placeholder and loads it', async () => {
+    // static guard: renderModelDetail must create #source-banner and call refreshSourceBanner
+    const appSrc = fs.readFileSync(path.join(ROOT, 'public/js/app.js'), 'utf8');
+    assert.ok(appSrc.includes('<div id="source-banner"></div>') && appSrc.includes('this.refreshSourceBanner(model.id)'));
   });
 
   console.log(`\n${passed} ingest UI checks passed`);
