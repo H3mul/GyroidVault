@@ -154,6 +154,28 @@ npm start
 
 ---
 
+## Import from a URL (Printables, Thingiverse)
+
+In **New Model**, paste a model page URL and click **Import**. The title, description, source link and tags are filled in (including an origin tag such as `source:printables`) and any downloadable files are listed. Edit anything, then **Create Model**; the files and cover image are downloaded in the background and show up on the model page.
+
+- **Printables:** full import (metadata, tags, cover, files). No account needed.
+- **Thingiverse:** title, description and cover only, unless you set `THINGIVERSE_TOKEN` (a Thingiverse app token) to also import tags and files.
+- **Other sites:** pages that expose OpenGraph/JSON-LD metadata give title and description; sites that block automated access (e.g. Thangs, MakerWorld) cannot be imported and you fill the form in by hand.
+- **One click from the model page:** drag the *Send to GyroidVault* link from the New Model dialog to your bookmarks bar. It opens `#/import?url=<page>` on your instance.
+- **API:** `POST /api/ingest/preview {url}`, `POST /api/ingest {url, auto_rename?, allow_duplicate?, download_files?, file_ids?}` (creates the model and starts a download job), `GET /api/ingest/jobs/:id`, `POST /api/ingest/jobs/:id/retry`. Requires an uploader or admin account.
+- **Limits:** `INGEST_MAX_FILE_MB` (default 200) and `INGEST_MAX_TOTAL_MB` (default 500). Only normal model/slicer/archive/image file types are downloaded, executables are rejected, and private or local network addresses are refused.
+
+### Keeping imported models up to date
+
+Models imported from Printables or Thingiverse are tracked. About once a day (**Settings → Source Update Check Interval**, `0` disables) GyroidVault checks each tracked model's source and flags it when the author changed the files. Nothing is ever downloaded automatically.
+
+- **What counts as an update:** a changed file list (new, removed, renamed or re-uploaded files). Title/description/tag edits alone only offer **Refresh metadata**. A same-size replacement of a file with the same id cannot be detected.
+- **Model page:** an *Update available* banner with **Update from source…**, **Dismiss**, **Check now** and a link to the source. Library cards show an *Update* badge and the toolbar has an *Updates available* filter.
+- **Update from source** shows what changed, then creates a **new version** of the model (it becomes the latest; your current version and its files stay untouched). Unchanged files are copied from your current version, only new or changed files are downloaded. Your own edits to the title and description are kept, and your category, print tips and tags carry over. If no file can be fetched, no version is created.
+- **Existing models:** use **Track updates** on any model whose source link is a Printables or Thingiverse page. Models imported before tracking existed are checked against their creation date and labelled as an estimate.
+- **Politeness:** checks run one at a time with a pause between requests, at most 50 models per pass, back off after failures and skip a site that rate-limits. A missing source page is only reported after three consecutive misses, and nothing is deleted.
+- **Thingiverse:** without `THINGIVERSE_TOKEN` only "possibly updated" can be detected and files cannot be fetched.
+
 ## Security & Privacy
  
 - **100% Local & Self-Hosted:** Everything lives on your own storage in a lightweight SQLite database. No mandatory cloud accounts, no third-party trackers, no telemetry.

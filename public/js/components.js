@@ -248,11 +248,12 @@ const UI = {
       </div>
     `;
 
+    const updateBadge = m.update_state ? `<span class="badge" style="background:rgba(6,182,212,0.15);color:var(--accent-cyan);border:1px solid rgba(6,182,212,0.35);font-size:0.65rem;padding:1px 5px" title="${m.update_state === 'outdated' ? 'The source site has new files' : 'The source site may have been updated'}">Update</span>` : '';
     const versionBadge = m.version_count > 0 ? `<span class="badge" style="background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.3);font-size:0.65rem;padding:1px 5px" title="${m.version_count + 1} versions available">v${m.version_count + 1}</span>` : '';
 
     return `<div class="model-card ${isSelected ? 'selected' : ''}" onclick="App.handleModelCardClick(event, ${m.latest_version_id || m.id})" data-model-id="${m.id}">
       ${checkboxHtml}
-      <div class="model-card-thumb">${thumb}<div class="model-card-badges">${types} ${versionBadge}</div>${quickActions}</div>
+      <div class="model-card-thumb">${thumb}<div class="model-card-badges">${types} ${versionBadge}${updateBadge}</div>${quickActions}</div>
       <div class="model-card-body">
         <div style="display:flex;justify-content:space-between;align-items:flex-start">
           <div class="model-card-name" style="flex:1" title="${this.escapeHtml(m.name)}">${m.name}</div>
@@ -972,6 +973,19 @@ const UI = {
 
     return `
       <form id="model-form" onsubmit="App.handleModelSubmit(event,${model?.id || 'null'})">
+        ${!isEdit ? `
+        <div class="form-group" id="import-url-group">
+          <label class="form-label">Import from URL (Printables, Thingiverse)</label>
+          <div class="add-inline">
+            <input type="url" id="import-url-input" class="form-input" placeholder="https://www.printables.com/model/..." onkeydown="if(event.key==='Enter'){event.preventDefault();App.importFromUrl();}">
+            <button type="button" class="btn btn-secondary btn-sm" id="import-url-btn" onclick="App.importFromUrl()">Import</button>
+          </div>
+          <div id="import-url-status" style="font-size:.8rem;margin-top:6px;color:var(--text-muted)"></div>
+          <div id="import-files-list" style="margin-top:6px"></div>
+          <div style="font-size:.7rem;color:var(--text-muted);margin-top:6px">One click from a model page: drag
+            <a href="javascript:(function(){window.open('${UI.esc(location.origin)}/#/import?url='+encodeURIComponent(location.href))})()" onclick="event.preventDefault();App.toast('Drag this link to your bookmarks bar instead of clicking it')">Send to GyroidVault</a>
+            to your bookmarks bar.</div>
+        </div>` : ''}
         <div class="form-group">
           <label class="form-label">Name *</label>
           <input class="form-input" name="name" required value="${model?.name || ''}" placeholder="e.g. Phone Stand v2" id="model-name-input">
@@ -1031,6 +1045,75 @@ const UI = {
           <button type="submit" class="btn btn-primary" id="model-submit-btn">${isEdit ? 'Save Changes' : 'Create Model'}</button>
         </div>
       </form>`;
+  },
+
+  // ── Source update banner (model detail) ──
+  sourceBanner(info, modelId) {
+    if (!info || !info.supported) return '';
+    const site = UI.esc(info.site || 'source');
+    const link = info.source_url ? `<a href="${UI.esc(UI.safeUrl(info.source_url))}" target="_blank" rel="noopener">Open on ${site}</a>` : '';
+    const btn = (label, fn, primary) => `<button class="btn ${primary ? 'btn-primary' : 'btn-secondary'} btn-xs" onclick="App.${fn}(${Number(modelId)})">${label}</button>`;
+    const panel = (color, inner) => `<div class="glass-panel" style="padding:12px 16px;margin-bottom:16px;border-left:3px solid var(--accent-${color})">${inner}</div>`;
+    const muted = inner => `<div style="font-size:.75rem;color:var(--text-muted);margin-bottom:12px">${inner}</div>`;
+    if (!info.tracked) return muted(`Source: ${site}. ${btn('Track updates', 'trackSource')}`);
+    const s = info.summary || {};
+    const n = a => (a || []).length;
+    if (info.state === 'source_unavailable') {
+      return panel('yellow', `<strong>The source page is no longer available</strong> <span style="font-size:.8rem">(deleted or made private). Your files are untouched.</span><div style="margin-top:8px;display:flex;gap:8px;align-items:center">${btn('Check again', 'checkSourceNow')} ${link}</div>`);
+    }
+    if ((info.state === 'outdated' || info.state === 'unknown_changed') && !info.dismissed) {
+      const detail = info.state === 'outdated'
+        ? `${n(s.added)} new, ${n(s.changed)} changed, ${n(s.removed)} removed file(s) on ${site}.`
+        : `${site} reports a newer modification time${info.estimate ? ' than when this model was added (an estimate)' : ''}; the file list cannot be compared.`;
+      return panel('cyan', `<strong>${info.state === 'outdated' ? 'Update available' : 'Possibly updated'} on ${site}</strong>
+        <div style="font-size:.85rem;margin-top:4px">${UI.esc(detail)}</div>
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          ${btn('Update from source…', 'openSourceUpdate', true)} ${btn('Dismiss', 'dismissSource')} ${btn('Check now', 'checkSourceNow')} ${link}
+        </div>`);
+    }
+    if (info.state === 'metadata_changed' && !info.dismissed) {
+      return panel('cyan', `<strong>Title or description changed on ${site}</strong> <span style="font-size:.8rem">(files are the same)</span>
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">${btn('Refresh metadata', 'refreshSourceMeta', true)} ${btn('Dismiss', 'dismissSource')} ${btn('Check now', 'checkSourceNow')} ${link}</div>`);
+    }
+    return muted(`Tracking ${site} for updates${info.last_checked_at ? ` · last checked ${UI.esc(info.last_checked_at)} UTC` : ''}${info.last_error ? ` · last check failed: ${UI.esc(info.last_error)}` : ''} · ${btn('Check now', 'checkSourceNow')} ${link}`);
+  },
+
+  sourceUpdateDialog(pv, modelId) {
+    const kb = n => n ? ` (${n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'})` : '';
+    const badge = { new: 'new', changed: 'changed', unchanged: 'unchanged', unknown: '' };
+    const note = t => `<p style="font-size:.85rem;color:var(--text-muted)">${t}</p>`;
+    const d = pv.metaDiff || {};
+    const meta = [d.title && 'title', d.description && 'description', d.tags && 'tags'].filter(Boolean);
+    const body = pv.filesNeedToken || !pv.files.length
+      ? note(pv.filesNeedToken ? 'This site needs an API token (THINGIVERSE_TOKEN) for file downloads, so a new version cannot be created. Open the source page to get the files, or refresh metadata only.' : 'The source lists no downloadable files.')
+      : `${note('A new version keeps your current version untouched. Unchanged files are copied from it; only new or changed files are downloaded.')}
+        ${pv.estimate ? note('This model was added before update tracking, so what changed is an estimate.') : ''}
+        <div class="form-label">Files in the new version</div>
+        ${pv.files.map(f => `<label class="form-checkbox" style="display:block"><input type="checkbox" name="update_files" value="${UI.esc(f.id)}" checked> ${UI.esc(f.name)}${kb(f.size)} <span class="badge" style="font-size:.6rem">${UI.esc(badge[f.status] || '')}</span></label>`).join('')}
+        ${(pv.removed || []).length ? note(`Removed upstream (only in the old version): ${pv.removed.map(f => UI.esc(f.name)).join(', ')}`) : ''}`;
+    return `<div>${body}
+      ${meta.length ? note(`Also changed on the source: ${meta.join(', ')}. Anything you edited yourself is kept.`) : ''}
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+        ${pv.filesNeedToken || !pv.files.length ? '' : `<button type="button" class="btn btn-primary" onclick="App.runSourceUpdate(${Number(modelId)})">Create new version</button>`}
+      </div></div>`;
+  },
+
+  // ── URL import status banner (model detail) ──
+  ingestBanner(job) {
+    if (!job || job.status === 'completed') return '';
+    const active = job.status === 'pending' || job.status === 'running';
+    const failed = (job.detail || []).filter(d => d.status === 'failed' || d.status === 'skipped');
+    const upd = job.kind === 'update';
+    const title = active ? `${upd ? 'Creating a new version from the source site…' : 'Importing files from the source site…'} ${job.done}/${job.total || '?'}`
+      : job.status === 'partial' ? 'Some files could not be imported' : upd ? 'The update could not be completed' : 'Files could not be imported';
+    return `<div class="glass-panel" style="padding:12px 16px;margin-bottom:16px;border-left:3px solid var(--accent-${active ? 'cyan' : 'yellow'})">
+      <strong>${title}</strong>
+      ${job.error && !active ? `<div style="font-size:.85rem;margin-top:4px">${UI.esc(job.error)}</div>` : ''}
+      ${failed.map(d => `<div style="font-size:.8rem;color:var(--text-muted)">${UI.esc(d.name)}: ${UI.esc(d.reason || d.status)}</div>`).join('')}
+      ${active ? '' : `<div style="margin-top:8px;font-size:.8rem">Download the files manually from the source page, or
+        <button class="btn btn-secondary btn-xs" onclick="App.retryIngest(${Number(job.id)},${Number(job.model_id)})">${upd ? 'Retry update' : 'Retry import'}</button></div>`}
+    </div>`;
   },
 
   // ── Upload Files Form ──
@@ -1165,6 +1248,10 @@ const UI = {
           <option value="">All Status</option>
           <option value="true">Printed</option>
           <option value="false">Not Printed</option>
+        </select>
+        <select class="filter-select" id="filter-updates" onchange="App.handleFilter()">
+          <option value="">All Sources</option>
+          <option value="1">Updates available</option>
         </select>
         <select class="filter-select" id="filter-sort" onchange="App.handleFilter()">
           <option value="updated">Last Updated</option>
@@ -1890,6 +1977,13 @@ const UI = {
               <label style="font-weight: 600; font-size: 0.875rem; color: var(--text-primary); display: block; margin-bottom: 4px;">Auto-Sync Interval (Hours)</label>
               <input type="number" name="auto_sync_interval" value="${config.auto_sync_interval !== undefined ? config.auto_sync_interval : 1}" min="0" max="168" class="form-input" style="width: 100%; margin-top: 6px;">
               <span style="font-size: 0.725rem; color: var(--text-muted); display: block; margin-top: 4px;">Verify library against disk & prune removed files. Set to 0 to disable (spins down NAS/HDDs). Default is 1h.</span>
+            </div>
+
+            <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px 18px;">
+              <label style="font-weight: 600; font-size: 0.875rem; color: var(--text-primary); display: block; margin-bottom: 4px;">Source Update Check Interval (Hours)</label>
+              <input type="number" name="source_check_interval_hours" value="${config.source_check_interval_hours !== undefined ? config.source_check_interval_hours : 24}" min="0" max="720" class="form-input" style="width: 100%; margin-top: 6px;">
+              <span style="font-size: 0.725rem; color: var(--text-muted); display: block; margin-top: 4px;">How often models imported from Printables/Thingiverse are checked for changes. Set to 0 to disable. Default is 24h. Updates are never downloaded automatically.</span>
+              <button type="button" class="btn btn-secondary btn-xs" style="margin-top: 8px;" onclick="App.checkAllSources()">Check all tracked models now</button>
             </div>
           </div>
 

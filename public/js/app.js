@@ -547,6 +547,14 @@ const App = {
       }
       document.getElementById('nav-dashboard')?.classList.add('active');
       this.renderDashboard();
+    } else if (path === '/import') {
+      // Deep link / bookmarklet: #/import?url=<model page URL>
+      const url = params.get('url') || '';
+      this.navigate('/models');
+      this.showCreateModel().then(() => {
+        const input = document.getElementById('import-url-input');
+        if (input && url) { input.value = url; this.importFromUrl(); }
+      });
     } else if (path === '/models') {
       document.getElementById('nav-models')?.classList.add('active');
       this.renderModels(Object.fromEntries(params));
@@ -694,7 +702,7 @@ const App = {
   // ─── Models List ──────────────────────────────────────────────────────
   async renderModels(params = {}) {
     // check if we should show folder view instead (only when no search/category/tag/format filter is active)
-    const hasActiveFilter = !!(params.search || params.category || params.tag || (params.format && params.format !== 'all') || params.user || params.printed || params.project_id);
+    const hasActiveFilter = !!(params.search || params.category || params.tag || (params.format && params.format !== 'all') || params.user || params.printed || params.updates || params.project_id);
     if (this.libraryViewMode === 'folder' && !hasActiveFilter) {
       return this.renderBrowse(params.path || '');
     }
@@ -722,6 +730,7 @@ const App = {
     if (params.tag) document.getElementById('filter-tag').value = params.tag;
     if (params.user) document.getElementById('filter-user').value = params.user;
     if (params.printed) document.getElementById('filter-printed').value = params.printed;
+    if (params.updates) document.getElementById('filter-updates').value = params.updates;
     if (params.sort) document.getElementById('filter-sort').value = params.sort;
     if (params.limit) {
       const limitSelect = document.getElementById('filter-limit');
@@ -1321,6 +1330,7 @@ const App = {
     const tag = document.getElementById('filter-tag')?.value;
     const user = document.getElementById('filter-user')?.value;
     const printed = document.getElementById('filter-printed')?.value;
+    const updates = document.getElementById('filter-updates')?.value;
     const sort = document.getElementById('filter-sort')?.value;
     const limit = document.getElementById('filter-limit')?.value;
 
@@ -1336,11 +1346,12 @@ const App = {
     if (this.currentFormatFilter && this.currentFormatFilter !== 'all') params.set('format', this.currentFormatFilter);
     if (user) params.set('user', user);
     if (printed) params.set('printed', printed);
+    if (updates) params.set('updates', updates);
     if (sort && sort !== 'updated') params.set('sort', sort);
     if (limit && limit !== '24') params.set('limit', limit);
     params.set('page', '1');
 
-    const hasActiveFilter = !!(search || category || tag || (this.currentFormatFilter && this.currentFormatFilter !== 'all') || user || printed);
+    const hasActiveFilter = !!(search || category || tag || (this.currentFormatFilter && this.currentFormatFilter !== 'all') || user || printed || updates);
     if (this.libraryViewMode === 'folder' && !hasActiveFilter) {
       this.renderBrowse(this.currentBrowsePath);
     } else {
@@ -2392,7 +2403,9 @@ const App = {
       const hasPrinters = printers.length > 0;
 
       this.el.innerHTML = `
-        ${UI.modelDetail(model, hasPrinters)}`;
+        <div id="ingest-banner"></div><div id="source-banner"></div>${UI.modelDetail(model, hasPrinters)}`;
+      this.refreshIngestBanner(model.id);
+      this.refreshSourceBanner(model.id);
       // Initialize 3D viewer using chosen 3D preview file or first stl/3mf
       const files = model.files || [];
       const cadFiles = files.filter(f => f.file_type === 'stl' || f.file_type === '3mf' || f.file_type === 'step');
@@ -2943,6 +2956,7 @@ const App = {
   async showCreateModel() {
     await this.loadCache();
     this.pendingFiles = [];
+    this.pendingImport = null;
     let formHtml = UI.modelForm(null, this.cache.categories, this.cache.tags);
     
     if (this.libraryViewMode === 'folder' && this.currentBrowsePath) {
@@ -3066,6 +3080,122 @@ const App = {
     } catch (e) { this.toast('Failed to load model', 'error'); }
   },
 
+  // ── URL import (Printables / Thingiverse) ──
+  async importFromUrl() {
+    const input = document.getElementById('import-url-input');
+    const status = document.getElementById('import-url-status');
+    const btn = document.getElementById('import-url-btn');
+    const url = input?.value.trim();
+    if (!url || !status) return;
+    btn.disabled = true;
+    status.textContent = 'Reading the page…';
+    try {
+      const p = await API.ingestPreview(url);
+      const form = document.getElementById('model-form');
+      form.elements.name.value = p.title;
+      form.elements.description.value = p.description;
+      form.elements.source_url.value = p.url;
+      const have = new Map((this.cache.tags || []).map(t => [t.name.toLowerCase(), t.id]));
+      for (const name of p.tags) {
+        const existing = have.has(name) && form.querySelector(`input[name="tags"][value="${have.get(name)}"]`);
+        if (existing) { existing.checked = true; continue; }
+        document.getElementById('new-tag-input').value = name;
+        this.addInlineTag();
+      }
+      this.pendingImport = { url: p.url, files: p.files, coverUrl: p.coverUrl };
+      this.renderImportFiles(p);
+      status.textContent = p.existing_model ? `Note: "${p.existing_model.name}" was already imported from this URL.` : 'Review the fields below, then Create Model.';
+    } catch (e) {
+      this.pendingImport = null;
+      document.getElementById('import-files-list').innerHTML = '';
+      status.textContent = `Could not import: ${e.message}. You can still fill the form in by hand.`;
+      document.querySelector('input[name="source_url"]').value = url;
+    } finally { btn.disabled = false; }
+  },
+
+  renderImportFiles(p) {
+    const el = document.getElementById('import-files-list');
+    const kb = n => n ? ` (${n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'})` : '';
+    el.innerHTML = p.files.length
+      ? `<div class="form-label">Files to import</div>` + p.files.map(f =>
+          `<label class="form-checkbox" style="display:block"><input type="checkbox" name="import_files" value="${UI.esc(f.id)}" checked> ${UI.esc(f.name)}${kb(f.size)}</label>`).join('')
+      : `<div style="font-size:.8rem;color:var(--text-muted)">${p.filesNeedToken ? 'This site needs an API token (THINGIVERSE_TOKEN) for file downloads. Metadata only; upload the files yourself.' : 'No downloadable files found.'}</div>`;
+  },
+
+  async refreshIngestBanner(modelId, wasActive = false) {
+    const el = document.getElementById('ingest-banner');
+    if (!el) return;
+    let job;
+    try { job = await API.ingestJobForModel(modelId); } catch (e) { return; }
+    const active = !!job && ['pending', 'running'].includes(job.status);
+    if (wasActive && !active) {
+      // finished update: open the version it created; finished import: show the new files
+      if (job && job.kind === 'update' && job.result_model_id && ['completed', 'partial'].includes(job.status)) return this.navigate(`/models/${job.result_model_id}`);
+      return this.renderModelDetail(modelId);
+    }
+    el.innerHTML = UI.ingestBanner(job);
+    if (active) setTimeout(() => this.refreshIngestBanner(modelId, true), 2000);
+  },
+
+  // ── Source update tracking ──
+  async refreshSourceBanner(modelId) {
+    const el = document.getElementById('source-banner');
+    if (!el) return;
+    try { el.innerHTML = UI.sourceBanner(await API.sourceInfo(modelId), modelId); } catch (e) { el.innerHTML = ''; }
+  },
+
+  async checkSourceNow(modelId) {
+    try {
+      const r = await API.sourceCheck(modelId);
+      this.toast(r.ok ? (r.state === 'current' ? 'Up to date' : 'Source has changes') : `Could not check the source: ${r.error}`, r.ok ? undefined : 'error');
+    } catch (e) { this.toast(e.message, 'error'); }
+    this.refreshSourceBanner(modelId);
+  },
+
+  async trackSource(modelId) {
+    try { await API.sourceTrack(modelId); this.toast('Tracking source for updates'); } catch (e) { this.toast(e.message, 'error'); }
+    this.refreshSourceBanner(modelId);
+  },
+
+  async dismissSource(modelId) {
+    try { await API.sourceDismiss(modelId); } catch (e) { this.toast(e.message, 'error'); }
+    this.refreshSourceBanner(modelId);
+  },
+
+  async refreshSourceMeta(modelId) {
+    try {
+      const r = await API.sourceRefreshMetadata(modelId);
+      this.toast(r.kept && r.kept.length ? `Metadata refreshed (kept your edits to ${r.kept.join(', ')})` : 'Metadata refreshed');
+      this.renderModelDetail(modelId);
+    } catch (e) { this.toast(e.message, 'error'); }
+  },
+
+  async openSourceUpdate(modelId) {
+    try {
+      const pv = await API.sourceUpdatePreview(modelId);
+      this.openModal('Update from source', UI.sourceUpdateDialog(pv, modelId));
+    } catch (e) { this.toast(`Could not read the source: ${e.message}`, 'error'); }
+  },
+
+  async runSourceUpdate(modelId) {
+    const ids = Array.from(document.querySelectorAll('input[name="update_files"]:checked')).map(c => c.value);
+    if (!ids.length) return this.toast('Select at least one file', 'error');
+    try {
+      await API.sourceUpdate(modelId, ids);
+      this.closeModal();
+      this.toast('Update started: a new version is being built');
+      this.refreshIngestBanner(modelId);
+    } catch (e) { this.toast(e.message, 'error'); }
+  },
+
+  async checkAllSources() {
+    try { await API.checkAllSources(); this.toast('Checking tracked models in the background'); } catch (e) { this.toast(e.message, 'error'); }
+  },
+
+  async retryIngest(jobId, modelId) {
+    try { await API.ingestRetry(jobId); this.refreshIngestBanner(modelId); } catch (e) { this.toast(e.message, 'error'); }
+  },
+
   async handleModelSubmit(e, id) {
     e.preventDefault();
     const form = new FormData(e.target);
@@ -3106,6 +3236,15 @@ const App = {
         this.renderModelDetail(id);
       } else {
         const model = await API.createModel(data);
+        const imp = this.pendingImport;
+        this.pendingImport = null;
+        if (imp) {
+          const chosen = Array.from(e.target.querySelectorAll('input[name="import_files"]:checked')).map(c => c.value);
+          if (chosen.length || imp.coverUrl) {
+            try { await API.ingestDownload(model.id, imp.url, chosen); }
+            catch (ie) { this.toast('Model created but file import could not start: ' + ie.message, 'error'); }
+          }
+        }
         // Upload pending files if any
         if (this.pendingFiles.length > 0) {
           const submitBtn = document.getElementById('model-submit-btn');

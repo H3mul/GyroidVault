@@ -168,6 +168,7 @@ router.get('/settings/system', authenticate, (req, res) => {
   if (config.auto_sync_interval === undefined) {
     config.auto_sync_interval = process.env.SYNC_INTERVAL_HOURS !== undefined ? String(process.env.SYNC_INTERVAL_HOURS) : '1';
   }
+  if (config.source_check_interval_hours === undefined) config.source_check_interval_hours = '24';
   res.json(config);
 });
 

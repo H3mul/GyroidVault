@@ -11,14 +11,20 @@ const { validatePathConfinement, safeUrl } = require('../middleware/security');
 const { getFileUrl, getThumbUrl, deleteModelInternal, getZipEntryBuffer, getSettingBool } = require('../utils/modelHelpers');
 
 // ─── GET /api/models ──────────────────────────────────────────────────────────
+// State of the family's latest version when an update is available and not dismissed (NULL otherwise)
+const UPDATE_STATE_SQL = `(SELECT ms.state FROM model_sources ms
+  WHERE ms.model_id = COALESCE((SELECT id FROM models WHERE parent_id=m.id ORDER BY created_at DESC, id DESC LIMIT 1), m.id)
+    AND ms.state IN ('outdated','unknown_changed') AND (ms.dismissed_key IS NULL OR ms.dismissed_key != ms.remote_key))`;
+
 router.get('/', (req, res) => {
   try {
-    const { search, category, tag, format, user, printed, sort = 'updated', order, project_id, page = 1, limit = 24 } = req.query;
+    const { search, category, tag, format, user, printed, sort = 'updated', order, project_id, page = 1, limit = 24, updates } = req.query;
     const needsFileCountSort = sort === 'files';
     const needsPrintCountSort = sort === 'prints';
     let query = `SELECT m.*, c.name as category_name, c.color as category_color, u.username as uploader_name,
       (SELECT id FROM models WHERE parent_id=m.id ORDER BY created_at DESC, id DESC LIMIT 1) as latest_version_id,
-      (SELECT COUNT(*) FROM models WHERE parent_id=m.id) as version_count
+      (SELECT COUNT(*) FROM models WHERE parent_id=m.id) as version_count,
+      ${UPDATE_STATE_SQL} as update_state
       ${needsFileCountSort ? ',(SELECT COUNT(*) FROM files WHERE model_id=m.id) as file_count' : ''}
       ${needsPrintCountSort ? ',(SELECT COUNT(*) FROM print_history WHERE model_id=m.id) as print_count' : ''}
       FROM models m
@@ -27,6 +33,8 @@ router.get('/', (req, res) => {
     
     const conds = [], params = [];
     
+    if (updates === '1' || updates === 'true') conds.push(`${UPDATE_STATE_SQL} IS NOT NULL`);
+
     // Filter out versions in main view
     if (!project_id) {
       conds.push("m.parent_id IS NULL");
@@ -418,6 +426,18 @@ router.put('/:id/preview-file', authenticate, (req, res) => {
 });
 
 // ─── POST /api/models/:id/versions ───────────────────────────────────────────
+/**
+ * Inserts a child version in the family of rootId. Only name/description/category are required;
+ * source updates also pass print_tips, custom_meta and source_url. Returns the new model id.
+ */
+function createVersionRecord(rootId, f, userId) {
+  const r = run(`
+    INSERT INTO models (name, description, category_id, print_tips, custom_meta, source_url, user_id, parent_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [f.name, f.description || '', f.category_id || null, f.print_tips || '', f.custom_meta || '{}', f.source_url || '', userId, rootId]);
+  return r.lastId;
+}
+
 router.post('/:id/versions', authenticate, (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -426,29 +446,45 @@ router.post('/:id/versions', authenticate, (req, res) => {
 
     const rootId = parent.parent_id || parent.id;
     const { name, description } = req.body;
-    
-    const r = run(`
-      INSERT INTO models (name, description, category_id, user_id, parent_id) 
-      VALUES (?, ?, ?, ?, ?)`, 
-      [name || `${parent.name} (New Version)`, description || parent.description, parent.category_id, req.user.id, rootId]
-    );
-    
+
+    const newId = createVersionRecord(rootId, {
+      name: name || `${parent.name} (New Version)`,
+      description: description || parent.description,
+      category_id: parent.category_id,
+    }, req.user.id);
+
     // Copy tags
     const tags = all('SELECT tag_id FROM model_tags WHERE model_id = ?', [id]);
     for (const t of tags) {
-      run('INSERT INTO model_tags (model_id, tag_id) VALUES (?, ?)', [r.lastId, t.tag_id]);
+      run('INSERT INTO model_tags (model_id, tag_id) VALUES (?, ?)', [newId, t.tag_id]);
     }
 
-    res.status(201).json({ id: r.lastId });
+    res.status(201).json({ id: newId });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed to create version' }); }
 });
 
 // ─── POST /api/models ─────────────────────────────────────────────────────────
-router.post('/', authenticate, requireUploader, (req, res) => {
-  const userId = req.user.id;
+/** Adds tags (ids or names, optional "NEW:" prefix) to a model, creating tags as needed. */
+function attachTags(modelId, tags) {
+  for (const t of tags || []) {
+    let tagId = t;
+    if (typeof t === 'string') {
+      const cleanTag = t.startsWith('NEW:') ? t.substring(4).trim() : t.trim();
+      if (!cleanTag) continue;
+      run('INSERT OR IGNORE INTO tags (name) VALUES (?)', [cleanTag]);
+      tagId = get('SELECT id FROM tags WHERE name=?', [cleanTag]).id;
+    }
+    run('INSERT OR IGNORE INTO model_tags (model_id,tag_id) VALUES (?,?)', [modelId, tagId]);
+  }
+}
+
+const reply = (status, body) => ({ status, body });
+
+/** Creates a model row, library folder and tags. Returns {status, body} like the HTTP route. */
+function createModelRecord(userId, input) {
   try {
-    let { name, description, print_tips, source_url, category_id, tags, custom_meta, parent_folder, create_subfolder, auto_rename } = req.body;
-    if (!name?.trim()) return res.status(400).json({ error: 'Name is required' });
+    let { name, description, print_tips, source_url, category_id, tags, custom_meta, parent_folder, create_subfolder, auto_rename } = input;
+    if (!name?.trim()) return reply(400, { error: 'Name is required' });
     
     let trimmedName = name.trim();
     let safeName = trimmedName.replace(/[<>:"/\\|?*]/g, '').trim() || `model_${Date.now()}`;
@@ -457,13 +493,13 @@ router.post('/', authenticate, requireUploader, (req, res) => {
     let basePath = LIBRARY_PATH;
     if (parent_folder) {
       const confined = validatePathConfinement(LIBRARY_PATH, parent_folder);
-      if (!confined) return res.status(400).json({ error: 'Invalid parent folder path' });
+      if (!confined) return reply(400, { error: 'Invalid parent folder path' });
       basePath = confined;
     }
 
     let libPath = create_subfolder !== false && create_subfolder !== 'false' ? path.join(basePath, safeName) : basePath;
     const confinedLib = validatePathConfinement(LIBRARY_PATH, path.relative(LIBRARY_PATH, libPath));
-    if (!confinedLib) return res.status(400).json({ error: 'Invalid model folder path' });
+    if (!confinedLib) return reply(400, { error: 'Invalid model folder path' });
     libPath = confinedLib;
 
     if (source_url) {
@@ -528,7 +564,7 @@ router.post('/', authenticate, requireUploader, (req, res) => {
       const primarySuggestion = suggestions[0] || `${trimmedName} (2)`;
 
       if (auto_rename !== true && auto_rename !== 'true') {
-        return res.status(409).json({
+        return reply(409, {
           error: `A model with the name "${trimmedName}" already exists.`,
           suggested_name: primarySuggestion,
           suggested_names: suggestions
@@ -539,7 +575,7 @@ router.post('/', authenticate, requireUploader, (req, res) => {
       safeName = trimmedName.replace(/[<>:"/\\|?*]/g, '').trim();
       libPath = create_subfolder !== false && create_subfolder !== 'false' ? path.join(basePath, safeName) : basePath;
       const reconfined = validatePathConfinement(LIBRARY_PATH, path.relative(LIBRARY_PATH, libPath));
-      if (!reconfined) return res.status(400).json({ error: 'Invalid model folder path' });
+      if (!reconfined) return reply(400, { error: 'Invalid model folder path' });
       libPath = reconfined;
     }
 
@@ -556,24 +592,163 @@ router.post('/', authenticate, requireUploader, (req, res) => {
 
     const r = run('INSERT INTO models (name,description,print_tips,source_url,category_id,custom_meta,user_id,library_path) VALUES (?,?,?,?,?,?,?,?)',
       [trimmedName, description||'', print_tips||'', source_url||'', category_id||null, metaStr, userId, libPath]);
-    if (tags?.length) { 
-      for (const t of tags) {
-        let tagId = t;
-        if (typeof t === 'string') {
-          const cleanTag = t.startsWith('NEW:') ? t.substring(4).trim() : t.trim();
-          if (!cleanTag) continue;
-          run('INSERT OR IGNORE INTO tags (name) VALUES (?)', [cleanTag]);
-          tagId = get('SELECT id FROM tags WHERE name=?', [cleanTag]).id;
-        }
-        run('INSERT OR IGNORE INTO model_tags (model_id,tag_id) VALUES (?,?)', [r.lastId, tagId]); 
-      }
-    }
-    res.status(201).json(get('SELECT * FROM models WHERE id=?', [r.lastId]));
+    attachTags(r.lastId, tags);
+    return reply(201, get('SELECT * FROM models WHERE id=?', [r.lastId]));
   } catch (e) {
     console.error('Failed to create model:', e);
-    res.status(500).json({ error: 'Failed to create model' });
+    return reply(500, { error: 'Failed to create model' });
   }
+}
+
+router.post('/', authenticate, requireUploader, (req, res) => {
+  const r = createModelRecord(req.user.id, req.body);
+  res.status(r.status).json(r.body);
 });
+
+/**
+ * Moves already-saved files (multer temp files or downloaded temp files) into the model's
+ * library folder and registers them. Shared by manual upload and URL ingestion.
+ * @param {object} model row from `models` (library_path must exist); mutated for thumbnail/preview ids
+ * @param {{path:string, originalname:string, size:number}[]} files
+ */
+function addFilesToModel(model, files) {
+  const id = model.id;
+  const libPath = model.library_path;
+  const { parseGcodeMetadata, extractGcodeThumbnail } = require('../utils/gcode');
+  const { extract3mfThumbnail } = require('../utils/3mf');
+  const { extractF3dThumbnail } = require('../utils/f3d');
+  const uploaded = [];
+    for (const file of files) {
+      // Malware Scanning / Magic Bytes validation
+      try {
+        const buffer = Buffer.alloc(4);
+        const fd = fs.openSync(file.path, 'r');
+        fs.readSync(fd, buffer, 0, 4, 0);
+        fs.closeSync(fd);
+        const hex = buffer.toString('hex').toUpperCase();
+        // MZ = 4D5A, ELF = 7F454C46, Script = 2321 (#!...)
+        if (hex.startsWith('4D5A') || hex.startsWith('7F454C46') || hex.startsWith('2321')) {
+          fs.unlinkSync(file.path);
+          console.error(`[SECURITY] Blocked upload of ${file.originalname}: Executable magic bytes detected (${hex})`);
+          continue;
+        }
+      } catch (err) {
+        console.error('Failed to validate magic bytes for', file.originalname, err);
+      }
+      
+      const safeOriginalName = path.basename(file.originalname);
+      const ft = getFileType(safeOriginalName);
+      
+      // Move file into library folder with strict path confinement
+      let finalDest = path.join(libPath, safeOriginalName);
+      try {
+        let counter = 1;
+        while (fs.existsSync(finalDest)) {
+          const ext = path.extname(safeOriginalName);
+          const base = path.basename(safeOriginalName, ext);
+          finalDest = path.join(libPath, `${base}_${counter}${ext}`);
+          counter++;
+        }
+        const confinedDest = validatePathConfinement(libPath, path.relative(libPath, finalDest));
+        if (!confinedDest) {
+          fs.unlinkSync(file.path);
+          continue;
+        }
+        fs.copyFileSync(file.path, confinedDest);
+        finalDest = confinedDest;
+        fs.unlinkSync(file.path);
+      } catch (err) {
+        console.error('Failed to move uploaded file to library:', err);
+        finalDest = file.path;
+      }
+
+      let metadata = null;
+      let fileThumbnail = null;
+
+      if (ft === 'gcode') {
+        const meta = parseGcodeMetadata(finalDest);
+        if (meta) metadata = JSON.stringify(meta);
+        fileThumbnail = extractGcodeThumbnail(finalDest, UPLOADS_DIR);
+        if (fileThumbnail && !model.thumbnail) {
+          run('UPDATE models SET thumbnail=? WHERE id=?', [fileThumbnail, id]);
+          model.thumbnail = fileThumbnail;
+        }
+      } else if (ft === '3mf') {
+        fileThumbnail = extract3mfThumbnail(finalDest, UPLOADS_DIR);
+        if (fileThumbnail && !model.thumbnail) {
+          run('UPDATE models SET thumbnail=? WHERE id=?', [fileThumbnail, id]);
+          model.thumbnail = fileThumbnail;
+        }
+      } else if (ft === 'f3d') {
+        fileThumbnail = extractF3dThumbnail(finalDest, UPLOADS_DIR);
+        if (fileThumbnail && !model.thumbnail) {
+          run('UPDATE models SET thumbnail=? WHERE id=?', [fileThumbnail, id]);
+          model.thumbnail = fileThumbnail;
+        }
+      } else if (ft === 'image') {
+        fileThumbnail = path.basename(finalDest);
+        if (!model.thumbnail) {
+          run('UPDATE models SET thumbnail=? WHERE id=?', [fileThumbnail, id]);
+          model.thumbnail = fileThumbnail;
+        }
+      }
+
+      const r = run('INSERT INTO files (model_id,filename,original_name,file_type,file_size,metadata,library_path,thumbnail) VALUES (?,?,?,?,?,?,?,?)',
+        [id, path.basename(finalDest), file.originalname, ft, file.size, metadata, finalDest, fileThumbnail]);
+      
+      // If model has no preview file set, default to first STL or 3MF
+      if (!model.preview_file_id && (ft === 'stl' || ft === '3mf')) {
+        run('UPDATE models SET preview_file_id=? WHERE id=?', [r.lastId, id]);
+        model.preview_file_id = r.lastId;
+      }
+
+      uploaded.push({ id: r.lastId, model_id: id, filename: path.basename(finalDest), original_name: file.originalname, file_type: ft, file_size: file.size, metadata, library_path: finalDest, thumbnail: fileThumbnail });
+
+      // Inspect internal files in uploaded ZIP archive without full disk extraction (when enabled, #78)
+      if (ft === 'zip' && getSettingBool('scan_zip_archives', true)) {
+        try {
+          const AdmZip = require('adm-zip');
+          const zip = new AdmZip(finalDest);
+          const entries = zip.getEntries();
+          const { SUPPORTED_EXTENSIONS, IMAGE_EXTENSIONS } = require('../utils/library');
+          for (const entry of entries) {
+            if (entry.isDirectory) continue;
+            const entryExt = path.extname(entry.entryName).toLowerCase();
+            if (SUPPORTED_EXTENSIONS.includes(entryExt) || IMAGE_EXTENSIONS.includes(entryExt)) {
+              const entryVirtualPath = finalDest + '::' + entry.entryName;
+              const entryFt = getFileType(entry.name);
+              let entryThumb = null;
+
+              if (entryFt === 'image' && !model.thumbnail) {
+                try {
+                  const thumbFilename = `thumb_${Date.now()}_${path.basename(entry.entryName)}`;
+                  const outPath = path.join(UPLOADS_DIR, thumbFilename);
+                  fs.writeFileSync(outPath, getZipEntryBuffer(entry));
+                  entryThumb = thumbFilename;
+                  run('UPDATE models SET thumbnail=? WHERE id=?', [thumbFilename, id]);
+                  model.thumbnail = thumbFilename;
+                } catch (e) {}
+              }
+
+              const entryR = run('INSERT INTO files (model_id, filename, original_name, file_type, file_size, library_path, is_archive_entry, archive_entry_path, thumbnail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [id, entry.name, entry.entryName, entryFt, entry.header.size, entryVirtualPath, 1, entry.entryName, entryThumb]);
+
+              if (!model.preview_file_id && (entryFt === 'stl' || entryFt === '3mf')) {
+                run('UPDATE models SET preview_file_id=? WHERE id=?', [entryR.lastId, id]);
+                model.preview_file_id = entryR.lastId;
+              }
+
+              uploaded.push({ id: entryR.lastId, model_id: id, filename: entry.name, original_name: entry.entryName, file_type: entryFt, file_size: entry.header.size, library_path: entryVirtualPath, thumbnail: entryThumb });
+            }
+          }
+        } catch (zipErr) {
+          console.warn('Could not inspect uploaded zip archive:', zipErr);
+        }
+      }
+    }
+  run("UPDATE models SET updated_at=datetime('now') WHERE id=?", [id]);
+  return uploaded;
+}
 
 // ─── PUT /api/models/:id ──────────────────────────────────────────────────────
 router.put('/:id', authenticate, (req, res) => {
@@ -722,11 +897,6 @@ router.post('/:id/files', authenticate, upload.array('files', 20), (req, res) =>
     if (!model) return res.status(404).json({ error: 'Model not found' });
     if (req.user.role !== 'admin' && model.user_id !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
     if (!req.files?.length) return res.status(400).json({ error: 'No files uploaded' });
-    const { parseGcodeMetadata, extractGcodeThumbnail } = require('../utils/gcode');
-    const { extract3mfThumbnail } = require('../utils/3mf');
-    const { extractF3dThumbnail } = require('../utils/f3d');
-    const uploaded = [];
-
     // Ensure model has a library directory
     let libPath = model.library_path;
     if (!libPath || !fs.existsSync(libPath)) {
@@ -746,135 +916,7 @@ router.post('/:id/files', authenticate, upload.array('files', 20), (req, res) =>
       model.library_path = libPath;
     }
 
-    for (const file of req.files) {
-      // Malware Scanning / Magic Bytes validation
-      try {
-        const buffer = Buffer.alloc(4);
-        const fd = fs.openSync(file.path, 'r');
-        fs.readSync(fd, buffer, 0, 4, 0);
-        fs.closeSync(fd);
-        const hex = buffer.toString('hex').toUpperCase();
-        // MZ = 4D5A, ELF = 7F454C46, Script = 2321 (#!...)
-        if (hex.startsWith('4D5A') || hex.startsWith('7F454C46') || hex.startsWith('2321')) {
-          fs.unlinkSync(file.path);
-          console.error(`[SECURITY] Blocked upload of ${file.originalname}: Executable magic bytes detected (${hex})`);
-          continue;
-        }
-      } catch (err) {
-        console.error('Failed to validate magic bytes for', file.originalname, err);
-      }
-      
-      const safeOriginalName = path.basename(file.originalname);
-      const ft = getFileType(safeOriginalName);
-      
-      // Move file into library folder with strict path confinement
-      let finalDest = path.join(libPath, safeOriginalName);
-      try {
-        let counter = 1;
-        while (fs.existsSync(finalDest)) {
-          const ext = path.extname(safeOriginalName);
-          const base = path.basename(safeOriginalName, ext);
-          finalDest = path.join(libPath, `${base}_${counter}${ext}`);
-          counter++;
-        }
-        const confinedDest = validatePathConfinement(libPath, path.relative(libPath, finalDest));
-        if (!confinedDest) {
-          fs.unlinkSync(file.path);
-          continue;
-        }
-        fs.copyFileSync(file.path, confinedDest);
-        finalDest = confinedDest;
-        fs.unlinkSync(file.path);
-      } catch (err) {
-        console.error('Failed to move uploaded file to library:', err);
-        finalDest = file.path;
-      }
-
-      let metadata = null;
-      let fileThumbnail = null;
-
-      if (ft === 'gcode') {
-        const meta = parseGcodeMetadata(finalDest);
-        if (meta) metadata = JSON.stringify(meta);
-        fileThumbnail = extractGcodeThumbnail(finalDest, UPLOADS_DIR);
-        if (fileThumbnail && !model.thumbnail) {
-          run('UPDATE models SET thumbnail=? WHERE id=?', [fileThumbnail, id]);
-          model.thumbnail = fileThumbnail;
-        }
-      } else if (ft === '3mf') {
-        fileThumbnail = extract3mfThumbnail(finalDest, UPLOADS_DIR);
-        if (fileThumbnail && !model.thumbnail) {
-          run('UPDATE models SET thumbnail=? WHERE id=?', [fileThumbnail, id]);
-          model.thumbnail = fileThumbnail;
-        }
-      } else if (ft === 'f3d') {
-        fileThumbnail = extractF3dThumbnail(finalDest, UPLOADS_DIR);
-        if (fileThumbnail && !model.thumbnail) {
-          run('UPDATE models SET thumbnail=? WHERE id=?', [fileThumbnail, id]);
-          model.thumbnail = fileThumbnail;
-        }
-      } else if (ft === 'image') {
-        fileThumbnail = path.basename(finalDest);
-        if (!model.thumbnail) {
-          run('UPDATE models SET thumbnail=? WHERE id=?', [fileThumbnail, id]);
-          model.thumbnail = fileThumbnail;
-        }
-      }
-
-      const r = run('INSERT INTO files (model_id,filename,original_name,file_type,file_size,metadata,library_path,thumbnail) VALUES (?,?,?,?,?,?,?,?)',
-        [id, path.basename(finalDest), file.originalname, ft, file.size, metadata, finalDest, fileThumbnail]);
-      
-      // If model has no preview file set, default to first STL or 3MF
-      if (!model.preview_file_id && (ft === 'stl' || ft === '3mf')) {
-        run('UPDATE models SET preview_file_id=? WHERE id=?', [r.lastId, id]);
-        model.preview_file_id = r.lastId;
-      }
-
-      uploaded.push({ id: r.lastId, model_id: id, filename: path.basename(finalDest), original_name: file.originalname, file_type: ft, file_size: file.size, metadata, library_path: finalDest, thumbnail: fileThumbnail });
-
-      // Inspect internal files in uploaded ZIP archive without full disk extraction (when enabled, #78)
-      if (ft === 'zip' && getSettingBool('scan_zip_archives', true)) {
-        try {
-          const AdmZip = require('adm-zip');
-          const zip = new AdmZip(finalDest);
-          const entries = zip.getEntries();
-          const { SUPPORTED_EXTENSIONS, IMAGE_EXTENSIONS } = require('../utils/library');
-          for (const entry of entries) {
-            if (entry.isDirectory) continue;
-            const entryExt = path.extname(entry.entryName).toLowerCase();
-            if (SUPPORTED_EXTENSIONS.includes(entryExt) || IMAGE_EXTENSIONS.includes(entryExt)) {
-              const entryVirtualPath = finalDest + '::' + entry.entryName;
-              const entryFt = getFileType(entry.name);
-              let entryThumb = null;
-
-              if (entryFt === 'image' && !model.thumbnail) {
-                try {
-                  const thumbFilename = `thumb_${Date.now()}_${path.basename(entry.entryName)}`;
-                  const outPath = path.join(UPLOADS_DIR, thumbFilename);
-                  fs.writeFileSync(outPath, getZipEntryBuffer(entry));
-                  entryThumb = thumbFilename;
-                  run('UPDATE models SET thumbnail=? WHERE id=?', [thumbFilename, id]);
-                  model.thumbnail = thumbFilename;
-                } catch (e) {}
-              }
-
-              const entryR = run('INSERT INTO files (model_id, filename, original_name, file_type, file_size, library_path, is_archive_entry, archive_entry_path, thumbnail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [id, entry.name, entry.entryName, entryFt, entry.header.size, entryVirtualPath, 1, entry.entryName, entryThumb]);
-
-              if (!model.preview_file_id && (entryFt === 'stl' || entryFt === '3mf')) {
-                run('UPDATE models SET preview_file_id=? WHERE id=?', [entryR.lastId, id]);
-                model.preview_file_id = entryR.lastId;
-              }
-
-              uploaded.push({ id: entryR.lastId, model_id: id, filename: entry.name, original_name: entry.entryName, file_type: entryFt, file_size: entry.header.size, library_path: entryVirtualPath, thumbnail: entryThumb });
-            }
-          }
-        } catch (zipErr) {
-          console.warn('Could not inspect uploaded zip archive:', zipErr);
-        }
-      }
-    }
-    run("UPDATE models SET updated_at=datetime('now') WHERE id=?", [id]);
+    const uploaded = addFilesToModel(model, req.files);
     res.status(201).json(uploaded);
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed to upload files' }); }
 });
@@ -934,4 +976,7 @@ router.post('/:id/prints', authenticate, (req, res) => {
 });
 
 module.exports = router;
-
+module.exports.createModelRecord = createModelRecord;
+module.exports.addFilesToModel = addFilesToModel;
+module.exports.attachTags = attachTags;
+module.exports.createVersionRecord = createVersionRecord;
